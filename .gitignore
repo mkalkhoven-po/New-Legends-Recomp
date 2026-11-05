@@ -1,0 +1,15 @@
+# Copyrighted game data: never commit
+*.iso
+game/
+# Generated from the game binary
+generated/
+build/
+__pycache__/
+*.pyc
+frames/
+shaders/
+out.log
+run*.log
+# Runtime state: saves and cached game files
+hdd/
+build.log

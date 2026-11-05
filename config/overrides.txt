@@ -1,0 +1,77 @@
+# Guest functions replaced by host code: ADDRESS host_function_name
+# The original stays available as f_ADDRESS for the host code to call.
+
+00173A90 hle_unreal_error_serialize   # FOutputDeviceError::Serialize: log the message first
+
+# XAPI controller API (XPP section) -> host XInput, runtime/src/hle/input.cpp
+00222AB8 hle_XInitDevices
+00222ABD hle_XGetDevices
+00222ADF hle_XGetDeviceChanges
+00222B4C hle_XInputOpen
+00222BC1 hle_XInputClose
+00222BCD hle_XInputGetCapabilities
+00222DBF hle_XInputGetState
+00222E30 hle_XInputSetState
+
+# DirectSound API -> host mixer, runtime/src/hle/dsound.cpp
+001E53D2 hle_DirectSoundCreate
+001E5418 hle_DirectSoundCreateBuffer
+001E546A hle_DirectSoundCreateStream
+001E3A12 hle_DirectSoundDoWork
+001E2E02 hle_DirectSoundUseHRTF
+
+# IDirectSound
+001E2DD1 hle_IDirectSound_Release
+001E388C hle_IDirectSound_DownloadEffectsImage
+001E450C hle_IDirectSound_CommitDeferredSettings
+001E4D9E hle_IDirectSound_SetDistanceFactor
+001E4DC2 hle_IDirectSound_SetDopplerFactor
+001E4E65 hle_IDirectSound_SetRolloffFactor
+001E4DE6 hle_IDirectSound_SetOrientation
+001E4E30 hle_IDirectSound_SetPosition
+001E4E89 hle_IDirectSound_SetVelocity
+001E4EBE hle_IDirectSound_SetI3DL2Listener
+001E5210 hle_IDirectSound_CreateSoundBuffer
+
+# IDirectSoundBuffer (Unlock at 001E2DE7 stays: it only returns 0)
+001E2DEC hle_ds_Release
+001E38B3 hle_ds_SetVolume
+001E38CF hle_ds_SetFilter
+001E38EB hle_ds_SetHeadroom
+001E3907 hle_ds_SetMixBins
+001E3923 hle_ds_SetMixBins
+001E393F hle_buf_Play
+001E3963 hle_buf_Stop
+001E397B hle_buf_GetStatus
+001E3997 hle_buf_GetCurrentPosition
+001E39B7 hle_buf_SetCurrentPosition
+001E39D3 hle_buf_Lock
+001E4524 hle_ds_SetFrequency
+001E4540 hle_ds_SetOutputBuffer
+001E455C hle_ds_SetAllParameters
+001E457C hle_ds_SetMaxDistance
+001E45A0 hle_ds_SetMinDistance
+001E45C4 hle_ds_SetPosition
+001E45F9 hle_ds_SetVelocity
+001E4EDE hle_buf_SetBufferData
+
+# IDirectSoundStream
+001E3A03 hle_ds_SetVolume
+001E3A08 hle_ds_SetFilter
+001E3A0D hle_ds_SetMixBins
+001E462E hle_ds_SetFrequency
+001E4633 hle_ds_SetOutputBuffer
+001E4638 hle_ds_SetAllParameters
+001E463D hle_ds_SetMaxDistance
+001E4655 hle_ds_SetMinDistance
+001E466D hle_ds_SetPosition
+001E4696 hle_ds_SetVelocity
+
+# XMediaObject vtable of the stream (0x263928)
+001E3F73 hle_stream_AddRef
+001E3FB7 hle_stream_Release
+001E3422 hle_stream_GetInfo
+001E3520 hle_stream_GetStatus
+001E3574 hle_stream_Process
+001E3488 hle_stream_Discontinuity
+001E34D4 hle_stream_Flush
