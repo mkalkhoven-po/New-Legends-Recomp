@@ -94,3 +94,4 @@ void pgraph_method(u32 subch, u32 obj_instance, u32 method, u32 value);
 // ----------------------------------------------------------------- video
 void video_init();
 void video_set_scanout(u32 phys);
+void video_wait_vblank();

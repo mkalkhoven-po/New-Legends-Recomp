@@ -13,3 +13,4 @@ run*.log
 # Runtime state: saves and cached game files
 hdd/
 build.log
+smoke/

@@ -71,11 +71,46 @@ static std::vector<ScriptPress> parse_script() {
     return out;
 }
 
+// NL_MONKEY=seed: random play for automated tests. Walks around holding a
+// stick direction, looks around, and presses buttons (never Back or Start,
+// which would leave the level for the menus).
+static void monkey_state(XINPUT_GAMEPAD& g, s64 now) {
+    static u32 rng = (u32)atoi(getenv("NL_MONKEY")) * 2654435761u + 1;
+    static s64 next_walk, next_press, press_until;
+    static SHORT lx, ly, rx;
+    static u16 button;
+    auto rnd = [&] {
+        rng ^= rng << 13;
+        rng ^= rng >> 17;
+        rng ^= rng << 5;
+        return rng;
+    };
+    if (now >= next_walk) {
+        next_walk = now + 500 + rnd() % 1500;
+        lx = (SHORT)(rnd() % 65535 - 32767);
+        ly = (SHORT)(rnd() % 32767);  // mostly forward: covers ground
+        rx = (SHORT)(rnd() % 3 == 0 ? rnd() % 65535 - 32767 : 0);
+    }
+    if (now >= next_press) {
+        static const u16 buttons[] = {XINPUT_GAMEPAD_A, XINPUT_GAMEPAD_B, XINPUT_GAMEPAD_X, XINPUT_GAMEPAD_Y,
+                                      XINPUT_GAMEPAD_LEFT_SHOULDER, XINPUT_GAMEPAD_RIGHT_SHOULDER};
+        next_press = now + 200 + rnd() % 600;
+        press_until = now + 100;
+        button = buttons[rnd() % 6];
+    }
+    g.sThumbLX = lx;
+    g.sThumbLY = ly;
+    g.sThumbRX = rx;
+    if (now < press_until) g.wButtons |= button;
+}
+
 static void virtual_state(XINPUT_STATE* st) {
     static std::vector<ScriptPress> script = parse_script();
+    static bool monkey = getenv("NL_MONKEY") != nullptr;
     static u32 packet;
     XINPUT_GAMEPAD g{};
     s64 now = now_ms();
+    if (monkey) monkey_state(g, now);
     for (auto& p : script)
         if (now >= p.at_ms && now < p.at_ms + 150) {
             g.wButtons |= p.buttons;

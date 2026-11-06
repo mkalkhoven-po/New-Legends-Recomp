@@ -260,7 +260,7 @@ def build_harness(cases_src):
     with open(bat, "w") as f:
         f.write(f'@call "{VCVARS}" >nul\n')
         f.write(f'@"{CLANG}" /nologo /O1 /EHsc /std:c++17 -w /I "{os.path.join(ROOT, "runtime", "include")}" '
-                + " ".join(f'"{x}"' for x in files) + f' /Fe"{exe}" /Fo"{OUT}\\\\"\n')
+                + " ".join(f'"{x}"' for x in files) + f' onecore.lib /Fe"{exe}" /Fo"{OUT}\\\\"\n')
     r = subprocess.run(["cmd", "/c", bat], capture_output=True, text=True)
     if r.returncode:
         print(r.stdout[-6000:], r.stderr[-3000:])

@@ -52,6 +52,33 @@ void rt_icall(Ctx* c, u32 target) {
     fatal("indirect call to unknown address %08X (return address %08X, esp %08X)", target, rd32(c->esp), c->esp);
 }
 
+// Guest code is nested C calls, so continuing in an outer guest frame means
+// unwinding the host stack to it. The guest stack grows down: the frame the
+// catch resumes in is the innermost one whose entry esp is above the
+// continuation's esp; deeper instances let the exception pass. What is left
+// of the function runs as its own entry, including its return.
+void rt_eh_frame(Ctx* c, GuestFunc body) {
+    u32 entry_esp = c->esp, target = 0;
+    for (;;) {
+        try {
+            if (target) rt_icall(c, target);
+            else body(c);
+            return;
+        } catch (const GuestResume& r) {
+            if (c->esp >= entry_esp) throw;
+            target = r.target;
+        }
+    }
+}
+
+// _except_handler3 calls the block and never gets it back: the block starts
+// by restoring esp, saved 8 bytes below the frame; ebp sits 16 above it.
+void rt_except_resume(Ctx* c, u32 target, u32 frame) {
+    c->esp = rd32(frame - 8);
+    c->ebp = frame + 16;
+    throw GuestResume{target};
+}
+
 void rt_bad_jump(Ctx* c, u32 from, u32 target) {
     guest_backtrace(c);
     fatal("jump table at %08X went to unknown target %08X", from, target);

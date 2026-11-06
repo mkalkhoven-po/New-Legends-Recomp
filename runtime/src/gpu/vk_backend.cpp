@@ -384,6 +384,44 @@ void vkb_clear(u32 flags, u32 argb, float depth, u32 stencil, int x0, int y0, in
     vkCmdClearAttachments(cmd(), n, att, 1, &r);
 }
 
+BlitResult vkb_blit(u32 src, u32 dst, u32 sx, u32 sy, u32 dx, u32 dy, u32 w, u32 h, u32 src_pitch, u32, u32 bpp) {
+    auto s = g_color_surfaces.find(src), d = g_color_surfaces.find(dst);
+    if (s == g_color_surfaces.end() && d == g_color_surfaces.end()) return BlitResult::Memory;
+    if (s == g_color_surfaces.end()) {
+        if (bpp != 4) return BlitResult::Memory;
+        // Guest pixels into a render target (BGRA, like the surface).
+        Image& im = d->second;
+        end_rendering();
+        transition(im, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+        Upload up = upload(nullptr, (VkDeviceSize)w * h * 4, 16);
+        for (u32 y = 0; y < h; y++)
+            for (u32 x = 0; x < w; x++) {
+                u32 px = rd32(src + (sy + y) * src_pitch + (sx + x) * 4) | 0xFF000000u;
+                memcpy(up.ptr + (size_t)(y * w + x) * 4, &px, 4);
+            }
+        VkBufferImageCopy r{};
+        r.bufferOffset = up.off;
+        r.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+        r.imageOffset = {(int)dx, (int)dy, 0};
+        r.imageExtent = {w, h, 1};
+        vkCmdCopyBufferToImage(cmd(), up.buf, im.img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &r);
+        return BlitResult::Done;
+    }
+    if (d == g_color_surfaces.end()) return BlitResult::SourceIsTarget;
+    if (s == d) return BlitResult::Done;  // overlapping self-copy: not used by D3D paths seen
+    end_rendering();
+    transition(s->second, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+    transition(d->second, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+    VkImageCopy c{};
+    c.srcSubresource = c.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+    c.srcOffset = {(int)sx, (int)sy, 0};
+    c.dstOffset = {(int)dx, (int)dy, 0};
+    c.extent = {w, h, 1};
+    vkCmdCopyImage(cmd(), s->second.img, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, d->second.img,
+                   VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &c);
+    return BlitResult::Done;
+}
+
 // --------------------------------------------------------------- shaders
 static shaderc_compiler_t g_shaderc;
 static std::unordered_map<std::string, VkShaderModule> g_modules;

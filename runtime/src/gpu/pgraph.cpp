@@ -22,14 +22,14 @@ static u32 obj_class(u32 inst) {
 
 // DMA object lookups go through RAMHT; cache them per handle.
 static std::unordered_map<u32, u32> g_dma_cache;
-static u32 dma_base(u32 ctx_method) {
-    u32 h = g_k.r(ctx_method);
+static u32 dma_handle_base(u32 h) {
     auto it = g_dma_cache.find(h);
     if (it != g_dma_cache.end()) return it->second;
     u32 b = dma_object(ramht_lookup(h)).base;
     g_dma_cache[h] = b;
     return b;
 }
+static u32 dma_base(u32 ctx_method) { return dma_handle_base(g_k.r(ctx_method)); }
 
 // Guest address of `offset` within the DMA object bound by `ctx_method`.
 static u32 dma_addr(u32 ctx_method, u32 offset) { return gpu_addr(dma_base(ctx_method) + offset); }
@@ -281,7 +281,8 @@ static void argb_to_vec4(u32 v, float* out) {
 }
 
 static bool is_linear_format(u32 f) {
-    static const u8 linear[] = {0x10, 0x11, 0x12, 0x13, 0x1B, 0x1C, 0x1D, 0x1E, 0x1F, 0x20, 0x3F, 0x40, 0x41};
+    static const u8 linear[] = {0x10, 0x11, 0x12, 0x13, 0x14, 0x16, 0x17, 0x18, 0x1B, 0x1C, 0x1D, 0x1E, 0x1F,
+                                0x20, 0x35, 0x37, 0x3D, 0x3E, 0x3F, 0x40, 0x41};
     for (u8 l : linear)
         if (f == l) return true;
     return false;
@@ -403,6 +404,35 @@ static bool assemble_vertices(DrawKind kind, DrawCall& d, VsInputs& in) {
     return !d.indices.empty();
 }
 
+// The material's specular power, recovered from what D3D sends. The hardware
+// evaluates a polynomial; D3D gets its first coefficient from a table in its
+// data, indexed by 3 * log2(power), and for powers below 1 from
+// -exp(-ln(64) / power). Going back through those gives the power itself.
+constexpr u32 D3D_SPECULAR_TABLE = 0x001BC828;
+constexpr u32 SPECULAR_TABLE_SIZE = 32;
+static float specular_power(float a) {
+    static float cached_a = 1, cached_power;
+    if (a == cached_a) return cached_power;
+    float power = 1;
+    if (a > -1e-6f) {
+        power = 1;
+    } else if (a <= rdf32(D3D_SPECULAR_TABLE + 4 * (SPECULAR_TABLE_SIZE - 1))) {
+        power = powf(2.0f, (SPECULAR_TABLE_SIZE - 1) / 3.0f);
+    } else {
+        // The table falls monotonically from 0 to -1.
+        for (u32 i = 0; i + 1 < SPECULAR_TABLE_SIZE; i++) {
+            float t0 = rdf32(D3D_SPECULAR_TABLE + 4 * i), t1 = rdf32(D3D_SPECULAR_TABLE + 4 * (i + 1));
+            if (a <= t0 && a > t1) {
+                power = powf(2.0f, (i + (t0 - a) / (t0 - t1)) / 3.0f);
+                break;
+            }
+        }
+    }
+    cached_a = a;
+    cached_power = power;
+    return power;
+}
+
 static void fill_uniforms(const DrawCall& d, const RenderTargets& rt, Uniforms& u) {
     memcpy(u.c, g_k.constants, sizeof u.c);
     memcpy(u.inline_attr, g_k.inline_attr, sizeof u.inline_attr);
@@ -415,6 +445,7 @@ static void fill_uniforms(const DrawCall& d, const RenderTargets& rt, Uniforms& 
     }
     argb_to_vec4(g_k.r(NV097_SET_FOG_COLOR), u.fog_color);
     u.misc[0] = (float)(g_k.r(NV097_SET_ALPHA_REF) & 0xFF);
+    u.misc[1] = specular_power(g_k.f(NV097_SET_SPECULAR_PARAMS));
     for (u32 i = 0; i < 4; i++) {
         bool lin = (d.tex_mask >> i & 1) && d.tex[i].linear;
         u.tex_scale[i][0] = lin && d.tex[i].width ? 1.0f / d.tex[i].width : 1.0f;
@@ -437,6 +468,7 @@ static void fill_uniforms(const DrawCall& d, const RenderTargets& rt, Uniforms& 
     u.material_emission[3] = g_k.f(NV097_SET_MATERIAL_ALPHA);
     vec(u.eye_position, NV097_SET_EYE_POSITION, 4);
     vec(u.fog_params, NV097_SET_FOG_PARAMS, 3);
+    vec(u.eye_vec, NV097_SET_EYE_VECTOR, 3);
     for (u32 i = 0; i < 8; i++) {
         Uniforms::Light& l = u.lights[i];
         u32 b = NV097_SET_LIGHT + 0x80 * i;
@@ -471,7 +503,7 @@ static void flush_draw() {
     for (u32 i = 0; i < 4; i++) {
         u32 mode = prog >> (5 * i) & 31;
         bool enabled = g_k.r(NV097_SET_TEXTURE_CONTROL0 + 0x40 * i) >> 30 & 1;
-        if (enabled && mode && mode != 4 && mode != 5) {
+        if (enabled && mode && mode != 4 && mode != 5 && mode != 17) {
             texture_desc(i, d.tex[i]);
             d.tex_mask |= 1 << i;
         }
@@ -624,7 +656,7 @@ static void kelvin_method(u32 m, u32 v) {
         // The frame in the current colour surface is complete: show it.
         if (g_vk_ready) vkb_present(current_targets().color_addr);
         break;
-    case NV097_FLIP_STALL: break;  // presentation already paces the FIFO
+    case NV097_FLIP_STALL: video_wait_vblank(); break;
     case NV097_SET_CONTEXT_DMA_A:
     case NV097_SET_CONTEXT_DMA_B:
     case NV097_SET_CONTEXT_DMA_COLOR:
@@ -684,11 +716,69 @@ static void kelvin_method(u32 m, u32 v) {
     }
 }
 
+// ------------------------------------------------------------- 2D objects
+constexpr u32 CLASS_CLIP = 0x19, CLASS_BETA1 = 0x12, CLASS_BETA4 = 0x72;
+constexpr u32 CLASS_M2MF = 0x39, CLASS_SURFACE_2D = 0x62, CLASS_IMAGE_BLIT = 0x9F;
+static u32 g_2d[3][0x400 / 4];  // method values of the M2MF, surface and blit objects
+enum { OBJ_M2MF, OBJ_SURFACE, OBJ_BLIT };
+
+static void count_once(const char* what) {
+    static std::map<std::string, u32> seen;
+    if (!seen[what]++) log_msg("[pgraph] %s", what);
+}
+
+static u32 bytes_per_pixel_2d(u32 format) {
+    switch (format) {
+    case 1: return 1;     // Y8
+    case 4: case 5: return 2;  // 16-bit formats
+    default: return 4;
+    }
+}
+
+// NV062 surface: 0x184 source DMA, 0x188 destination DMA, 0x300 format,
+// 0x304 pitches, 0x308/0x30C offsets. NV09F blit: 0x300 source point, 0x304
+// destination point, 0x308 size (starts the blit).
+static void image_blit(u32 size) {
+    const u32* sf = g_2d[OBJ_SURFACE];
+    const u32* bl = g_2d[OBJ_BLIT];
+    u32 w = size & 0xFFFF, h = size >> 16;
+    u32 sx = bl[0x300 / 4] & 0xFFFF, sy = bl[0x300 / 4] >> 16, dx = bl[0x304 / 4] & 0xFFFF, dy = bl[0x304 / 4] >> 16;
+    u32 src = gpu_addr(dma_handle_base(sf[0x184 / 4]) + sf[0x308 / 4]);
+    u32 dst = gpu_addr(dma_handle_base(sf[0x188 / 4]) + sf[0x30C / 4]);
+    u32 pitch_s = sf[0x304 / 4] & 0xFFFF, pitch_d = sf[0x304 / 4] >> 16, bpp = bytes_per_pixel_2d(sf[0x300 / 4]);
+    switch (vkb_blit(src, dst, sx, sy, dx, dy, w, h, pitch_s, pitch_d, bpp)) {
+    case BlitResult::Done: return;
+    case BlitResult::SourceIsTarget: count_once("blit from render target to memory not supported"); return;
+    case BlitResult::Memory: break;
+    }
+    for (u32 y = 0; y < h; y++)
+        memmove(gptr(dst + (dy + y) * pitch_d + dx * bpp), gptr(src + (sy + y) * pitch_s + sx * bpp), (size_t)w * bpp);
+}
+
+// NV039: 0x184/0x188 DMA in/out, 0x30C/0x310 offsets, 0x314/0x318 pitches,
+// 0x31C line length, 0x320 line count, 0x328 starts the copy.
+static void m2mf_copy() {
+    const u32* m = g_2d[OBJ_M2MF];
+    u32 in = gpu_addr(dma_handle_base(m[0x184 / 4]) + m[0x30C / 4]);
+    u32 out = gpu_addr(dma_handle_base(m[0x188 / 4]) + m[0x310 / 4]);
+    for (u32 i = 0; i < m[0x320 / 4]; i++)
+        memmove(gptr(out + i * m[0x318 / 4]), gptr(in + i * m[0x314 / 4]), m[0x31C / 4]);
+}
+
+static void object_2d_method(u32 cls, u32 m, u32 v) {
+    int obj = cls == CLASS_M2MF ? OBJ_M2MF : cls == CLASS_SURFACE_2D ? OBJ_SURFACE : OBJ_BLIT;
+    if (m < 0x400) g_2d[obj][m / 4] = v;
+    if (cls == CLASS_IMAGE_BLIT && m == 0x308) image_blit(v);
+    if (cls == CLASS_M2MF && m == 0x328) m2mf_copy();
+}
+
 void pgraph_method(u32 subch, u32 inst, u32 method, u32 value) {
     u32 cls = obj_class(inst);
     g_subch = subch;
     if (g_trace_methods) log_msg("[mthd] %u:%02X %04X %08X", subch, cls, method, value);
     if (cls == 0x97) return kelvin_method(method, value);
+    if (cls == CLASS_SURFACE_2D || cls == CLASS_IMAGE_BLIT || cls == CLASS_M2MF) return object_2d_method(cls, method, value);
+    if (cls == CLASS_CLIP || cls == CLASS_BETA1 || cls == CLASS_BETA4) return;  // blit state with no effect here
     if (g_unknown_class[cls]++ < 4)
         log_msg("[pgraph] class %02X (subchannel %u) method %04X <- %08X ignored", cls, subch, method, value);
 }

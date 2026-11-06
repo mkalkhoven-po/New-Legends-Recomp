@@ -132,6 +132,7 @@ void launch_data_restore() {
 }
 
 void host_window_hide();
+void crash_watchdog_stop();
 
 [[noreturn]] static void relaunch(u32 page) {
     std::string file = launch_file();
@@ -140,6 +141,17 @@ void host_window_hide();
         fclose(fp);
     }
     log_msg("launch: quick reboot into '%s' (launch data type %u)", (const char*)gptr(page + 8), rd32(page));
+    if (getenv("NL_TRACE_LAUNCH"))
+        for (u32 i = 0; i < PAGE_BYTES; i += 32)
+            if (rd32(page + i) | rd32(page + i + 4) | rd32(page + i + 8) | rd32(page + i + 12)) {
+                std::string line;
+                for (u32 j = 0; j < 32; j++) {
+                    char t[4];
+                    snprintf(t, sizeof t, "%02X", rd8(page + i + j));
+                    line += t;
+                }
+                log_msg("  +%03X %s", i, line.c_str());
+            }
     SetEnvironmentVariableA("NL_LAUNCH_DATA", file.c_str());
     // The new process inherits our console handles; a job ties its lifetime
     // to ours so whoever is waiting on this process sees the whole session.
@@ -164,6 +176,7 @@ void host_window_hide();
     // the window would linger.
     host_window_hide();
     audio_out_stop();
+    crash_watchdog_stop();
     WaitForSingleObject(pi.hProcess, INFINITE);
     DWORD code = 0;
     GetExitCodeProcess(pi.hProcess, &code);

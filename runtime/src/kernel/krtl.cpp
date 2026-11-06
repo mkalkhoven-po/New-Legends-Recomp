@@ -267,26 +267,107 @@ static u32 XcSHAFinal(Ctx*, KArgs a) {
 }
 
 // --------------------------------------------------------------- exceptions
-static u32 RtlRaiseException(Ctx* c, KArgs a) {
-    u32 rec = a[0];
-    u32 code = rd32(rec), addr = rd32(rec + 12), nparams = rd32(rec + 16);
-    std::string detail;
-    if (code == 0xE06D7363 && nparams >= 3) {
-        // MSVC C++ throw: params are magic, object, ThrowInfo. Name the type
-        // from ThrowInfo -> CatchableTypeArray -> first CatchableType -> TypeDescriptor.
-        u32 throw_info = rd32(rec + 20 + 8);
-        u32 cta = rd32(throw_info + 12);
-        u32 ct = rd32(cta + 4);
-        u32 td = rd32(ct + 4);
-        detail = " C++ exception of type " + read_cstr(td + 8);
-        if (read_cstr(td + 8) == ".H") detail += " value " + std::to_string((s32)rd32(rd32(rec + 20 + 4)));
+// ------------------------------------------------------------- exceptions
+// Structured exception dispatch as ntdll does it: the handlers on the fs:[0]
+// chain are guest code (MSVC's __CxxFrameHandler among them) and do the real
+// work. EXCEPTION_RECORD: code, flags, chained record, address, parameter
+// count, parameters. Registration frame: next, handler.
+constexpr u32 EXCEPTION_NONCONTINUABLE_ = 1, EXCEPTION_UNWINDING_ = 2, EXCEPTION_EXIT_UNWIND_ = 4, EXCEPTION_NESTED_CALL_ = 0x10;
+enum { ContinueExecution, ContinueSearch, NestedException, CollidedUnwind };
+constexpr u32 EH_CHAIN_END = 0xFFFFFFFFu;
+constexpr u32 CONTEXT_BYTES = 0x2D0, DISPATCHER_CONTEXT_BYTES = 4, RECORD_BYTES = 0x50;
+constexpr u32 CXX_EXCEPTION = 0xE06D7363, STATUS_UNWIND_ = 0xC0000027;
+static bool g_trace_eh = getenv("NL_TRACE_EH") != nullptr;
+
+static std::string exception_detail(u32 rec) {
+    u32 code = rd32(rec), nparams = rd32(rec + 16);
+    if (code != CXX_EXCEPTION || nparams < 3) return "";
+    // MSVC C++ throw: params are magic, object, ThrowInfo. Name the type from
+    // ThrowInfo -> CatchableTypeArray -> first CatchableType -> TypeDescriptor.
+    // A rethrow has no ThrowInfo.
+    u32 object = rd32(rec + 20 + 4), throw_info = rd32(rec + 20 + 8);
+    if (!throw_info) return " C++ rethrow";
+    u32 cta = rd32(throw_info + 12);
+    u32 ct = rd32(cta + 4);
+    u32 td = rd32(ct + 4);
+    std::string name = read_cstr(td + 8), detail = " C++ exception of type " + name;
+    if (name == ".H") detail += " value " + std::to_string((s32)rd32(object));
+    if (name == ".PAG" || name == ".PBG") {
+        // Unreal throws TCHAR strings (16-bit here).
+        u32 text = rd32(object);
+        detail += " \"";
+        for (u32 i = 0; i < 200 && rd16(text + 2 * i); i++) detail += (char)rd16(text + 2 * i);
+        detail += "\"";
     }
-    guest_backtrace(c);
-    fatal("guest raised exception %08X at %08X%s (SEH/C++ exceptions not supported yet; return address %08X)", code,
-          addr, detail.c_str(), rd32(c->esp));
+    return detail;
 }
 
-static u32 RtlUnwind(Ctx* c, KArgs) { fatal("RtlUnwind not supported yet (from %08X)", rd32(c->esp)); }
+// Call an EXCEPTION_ROUTINE (cdecl).
+static u32 call_handler(Ctx* c, u32 frame, u32 rec, u32 context, u32 dispatcher) {
+    return guest_call(c, rd32(frame + 4), {rec, frame, context, dispatcher}, false);
+}
+
+static u32 RtlRaiseException(Ctx* c, KArgs a) {
+    u32 rec = a[0];
+    if (g_trace_eh)
+        log_msg("[eh] raise %08X at %08X%s, return address %08X", rd32(rec), rd32(rec + 12), exception_detail(rec).c_str(),
+                rd32(c->esp));
+    // Handlers run below the raiser's stack; they get a blank context, which
+    // MSVC's handlers do not look at.
+    u32 saved_esp = c->esp;
+    c->esp -= CONTEXT_BYTES + DISPATCHER_CONTEXT_BYTES;
+    u32 context = c->esp, dispatcher = c->esp + CONTEXT_BYTES;
+    memset(gptr(context), 0, CONTEXT_BYTES + DISPATCHER_CONTEXT_BYTES);
+    u32 nested_end = 0;
+    for (u32 frame = rd32(c->fs_base); frame != EH_CHAIN_END; frame = rd32(frame)) {
+        u32 r = call_handler(c, frame, rec, context, dispatcher);
+        if (frame == nested_end) {
+            wr32(rec + 4, rd32(rec + 4) & ~EXCEPTION_NESTED_CALL_);
+            nested_end = 0;
+        }
+        if (r == ContinueExecution) {
+            if (rd32(rec + 4) & EXCEPTION_NONCONTINUABLE_) break;
+            c->esp = saved_esp;
+            return 0;
+        }
+        if (r == NestedException) {
+            wr32(rec + 4, rd32(rec + 4) | EXCEPTION_NESTED_CALL_);
+            nested_end = rd32(dispatcher);
+        } else if (r != ContinueSearch) {
+            break;
+        }
+    }
+    c->esp = saved_esp;
+    guest_backtrace(c);
+    fatal("unhandled guest exception %08X at %08X%s (return address %08X)", rd32(rec), rd32(rec + 12),
+          exception_detail(rec).c_str(), rd32(c->esp));
+}
+
+// (TargetFrame, TargetIp, ExceptionRecord, ReturnValue): call the handlers of
+// the frames above the target with the unwinding flag and unlink them. Its
+// only caller passes its own return address as TargetIp, so this just returns.
+static u32 RtlUnwind(Ctx* c, KArgs a) {
+    u32 target = a[0], rec = a[2], value = a[3];
+    u32 saved_esp = c->esp;
+    c->esp -= CONTEXT_BYTES + DISPATCHER_CONTEXT_BYTES + RECORD_BYTES;
+    u32 context = c->esp, dispatcher = context + CONTEXT_BYTES;
+    memset(gptr(context), 0, CONTEXT_BYTES + DISPATCHER_CONTEXT_BYTES + RECORD_BYTES);
+    if (!rec) {
+        rec = dispatcher + DISPATCHER_CONTEXT_BYTES;
+        wr32(rec, STATUS_UNWIND_);
+    }
+    wr32(rec + 4, rd32(rec + 4) | EXCEPTION_UNWINDING_ | (target ? 0 : EXCEPTION_EXIT_UNWIND_));
+    u32 frame = rd32(c->fs_base);
+    while (frame != EH_CHAIN_END && frame != target) {
+        u32 r = call_handler(c, frame, rec, context, dispatcher);
+        if (r == CollidedUnwind) frame = rd32(dispatcher);
+        else if (r != ContinueSearch) fatal("RtlUnwind: handler returned %u", r);
+        frame = rd32(frame);
+        wr32(c->fs_base, frame);
+    }
+    c->esp = saved_esp;
+    return value;
+}
 
 void kernel_register_rtl() {
     kreg(289, RtlInitAnsiString);

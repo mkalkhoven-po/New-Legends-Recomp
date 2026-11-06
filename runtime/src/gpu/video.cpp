@@ -1,12 +1,24 @@
 // Display timing: a 60 Hz vertical blank that raises the PCRTC interrupt.
 #include <windows.h>
 
+#include <condition_variable>
+
 #include "gpu.h"
 
 void kernel_set_irq(u32 line, bool level);
 constexpr u32 GPU_IRQ = 3;
 
 static u32 g_scanout;
+static std::mutex g_vblank_m;
+static std::condition_variable g_vblank_cv;
+static u64 g_vblanks;
+
+// The FIFO waits here at a flip: frames go out at the console's 60 Hz.
+void video_wait_vblank() {
+    std::unique_lock<std::mutex> lk(g_vblank_m);
+    u64 seen = g_vblanks;
+    g_vblank_cv.wait(lk, [&] { return g_vblanks != seen; });
+}
 
 void video_set_scanout(u32 phys) { g_scanout = phys; }
 
@@ -37,6 +49,11 @@ static DWORD WINAPI vblank_thread(void*) {
             nv_reg(NV_PCRTC_INTR_0) |= 1;  // VBLANK
         }
         nv2a_update_irq();
+        {
+            std::lock_guard<std::mutex> lk(g_vblank_m);
+            g_vblanks++;
+        }
+        g_vblank_cv.notify_all();
     }
 }
 

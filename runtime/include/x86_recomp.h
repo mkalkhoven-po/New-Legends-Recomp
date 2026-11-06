@@ -24,7 +24,9 @@ typedef int32_t s32;
 typedef int64_t s64;
 
 // Host address of guest address 0. Must match the reservation in memory.cpp.
-#define GUEST_BASE ((u8*)0x100000000ull)
+// 16 TiB: far above where Windows randomizes bottom-up allocations (heaps,
+// stacks) and below the top-down region with the DLLs, so it is always free.
+#define GUEST_BASE ((u8*)0x100000000000ull)
 
 union Xmm {
     __m128 v;
@@ -55,6 +57,11 @@ struct Ctx {
 };
 
 typedef void (*GuestFunc)(Ctx*);
+
+// Run a function that can be resumed after a guest catch block (dispatch.cpp).
+void rt_eh_frame(Ctx* c, GuestFunc body);
+// Enter a __except block of the function that owns SEH frame `frame`.
+[[noreturn]] void rt_except_resume(Ctx* c, u32 target, u32 frame);
 
 // ------------------------------------------------------------------ memory
 static inline u8* gptr(u32 a) { return GUEST_BASE + a; }

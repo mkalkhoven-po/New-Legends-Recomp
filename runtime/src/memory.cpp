@@ -23,7 +23,10 @@ void fatal(const char* fmt, ...) {
     va_end(ap);
     fputc('\n', stderr);
     fflush(stderr);
-    exit(1);
+    // Not exit(): other threads are running guest code and would crash into
+    // the static destructors.
+    TerminateProcess(GetCurrentProcess(), 1);
+    abort();
 }
 
 static void commit(u32 addr, u32 size) {

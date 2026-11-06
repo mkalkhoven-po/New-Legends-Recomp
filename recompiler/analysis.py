@@ -15,6 +15,12 @@ from capstone import x86
 
 # Sections that carry the X flag on Xbox but hold data, not code.
 DATA_SECTIONS = {".rdata", ".data", "DOLBY", "BINKDATA", "$$XTIMAGE", "$$XSIMAGE"}
+FUNCINFO_MAGIC = (0x19930520, 0x19930521, 0x19930522)
+NORETURN = {0x0018DE1E}  # _CxxThrowException: what follows a call to it is not code
+# CRT structured exception support of this binary.
+SEH_PROLOG = 0x00190750  # __SEH_prolog, called after `push size; push scopetable`
+EXCEPT_HANDLER3 = 0x00191288  # _except_handler3
+EXCEPT_BLOCK_CALL = 0x0019130B  # where it enters an __except block, for good
 
 JCC = {
     "jo", "jno", "jb", "jae", "je", "jne", "jbe", "ja",
@@ -128,6 +134,7 @@ class Analyzer:
         self.rejected = {}
         self.starts = set(known_functions)
         self.accepted_insns = {}  # address -> size, instructions of accepted functions
+        self.eh_frames = set()  # functions with a catch block that resumes inside them
 
     # ----------------------------------------------------------------- tables
     def _prev_insns(self, preds, va, limit=12):
@@ -272,7 +279,10 @@ class Analyzer:
                         if op.type == x86.X86_OP_IMM and self.img.is_code(op.imm & 0xFFFFFFFF):
                             fn.imm_refs.add(op.imm & 0xFFFFFFFF)
 
-                if m in STOPS:
+                # A debug service call (int 2dh) is followed by a breakpoint that
+                # only exists for an attached debugger; execution goes on.
+                after_debug_service = m == "int3" and self.img.read(va - 2, 2) == bytes((0xCD, 0x2D))
+                if m in STOPS and not after_debug_service:
                     edges[va] = ("stop", [], None)
                     break
                 if m == "ret":
@@ -280,12 +290,18 @@ class Analyzer:
                     break
                 if m == "call":
                     op = ins.operands[0]
+                    if va == EXCEPT_BLOCK_CALL:
+                        edges[va] = ("stop", [], None)
+                        break
                     if op.type == x86.X86_OP_IMM:
                         tgt = op.imm & 0xFFFFFFFF
                         if tgt != nxt:
                             if not self.img.is_code(tgt):
                                 raise DecodeError(f"{va:08X}: call outside code {tgt:08X}")
                             fn.calls.add(tgt)
+                            if tgt in NORETURN:
+                                edges[va] = ("stop", [], None)
+                                break
                     elif op.type == x86.X86_OP_MEM and op.mem.index and op.mem.scale == 4:
                         # call [idx*4 + table]: a handler table, possibly
                         # embedded in a code section where the data pointer
@@ -391,6 +407,7 @@ class Analyzer:
         self.starts.update(extra)
         work = sorted(self.starts)
         imm_candidates = set()
+        tables = self.eh_tables()
         while True:
             while work:
                 va = work.pop()
@@ -409,6 +426,12 @@ class Analyzer:
             # Immediates and data pointers are lower-confidence seeds.
             new = [c for c in imm_candidates | self.data_pointers() if c not in self.starts and c not in self.rejected]
             new = [c for c in new if self.plausible_start(c)]
+            # Exception funclets and catch continuations are only reached
+            # through the runtime's tables, however they look: never reject.
+            forced = [c for c in self.eh_entries(tables) if c not in self.starts and c not in new]
+            for c in forced:
+                self.rejected.pop(c, None)
+            new += forced
             if not new:
                 break
             log(f"  +{len(new)} pointer-seeded functions")
@@ -453,7 +476,98 @@ class Analyzer:
             except DecodeError as e:
                 self.rejected[va] = str(e)
                 del self.functions[va]
+        self.find_eh_frames(tables)
+        log(f"  {len(self.eh_frames)} functions resume after a catch")
         return self.functions
+
+    # ------------------------------------------------------- C++ exceptions
+    def eh_tables(self):
+        """MSVC FuncInfo tables in the data sections: {address: (unwind
+        funclets, catch funclets)}."""
+        out = {}
+        u32 = self.img.u32
+        x = self.img.xbe
+        for s in x.sections:
+            if s["name"] not in (".rdata", ".data"):
+                continue
+            raw = x.data[s["raw"] : s["raw"] + s["rawsize"]]
+            for i in range(0, len(raw) - 27, 4):
+                if struct.unpack_from("<I", raw, i)[0] not in FUNCINFO_MAGIC:
+                    continue
+                _, max_state, unwind_map, ntry, try_map = struct.unpack_from("<5I", raw, i)
+                # UnwindMapEntry: toState, action.
+                unwind = {u32(unwind_map + 8 * k + 4) for k in range(max_state)}
+                catches = set()
+                for t in range(ntry):
+                    # TryBlockMapEntry: low, high, catchHigh, nCatches, handlers.
+                    entry = try_map + 20 * t
+                    handlers = u32(entry + 16)
+                    # HandlerType: adjectives, type, object, handler.
+                    catches |= {u32(handlers + 16 * h + 12) for h in range(u32(entry + 12))}
+                out[s["vaddr"] + i] = (
+                    {a for a in unwind if a and self.img.is_code(a)},
+                    {a for a in catches if a and self.img.is_code(a)},
+                )
+        return out
+
+    def eh_entries(self, tables):
+        """Funclets, and where explored catch funclets say to continue (a
+        catch funclet returns that address in eax)."""
+        out = set()
+        for unwind, catches in tables.values():
+            out |= unwind | catches
+            for c in catches:
+                if c in self.functions and any(b.end == "ret" for b in self.functions[c].blocks.values()):
+                    out |= self.functions[c].imm_refs
+        for fn in self.functions.values():
+            for filt, handler in self.seh_scopes(fn):
+                out.add(handler)
+                if filt:
+                    out.add(filt)
+        return out
+
+    def seh_scopes(self, fn):
+        """(filter, handler) pairs of the scope table a function installs for
+        _except_handler3. A __finally has no filter."""
+        insns = sorted((i for b in fn.blocks.values() for i in b.insns), key=lambda i: i.address)
+        table = None
+        for prev, i in zip(insns, insns[1:]):
+            if prev.mnemonic != "push" or prev.operands[0].type != x86.X86_OP_IMM:
+                continue
+            via_prolog = i.mnemonic == "call" and i.operands[0].type == x86.X86_OP_IMM and i.operands[0].imm == SEH_PROLOG
+            direct = i.mnemonic == "push" and i.operands[0].type == x86.X86_OP_IMM and i.operands[0].imm == EXCEPT_HANDLER3
+            if via_prolog or direct:
+                table = prev.operands[0].imm & 0xFFFFFFFF
+        out = []
+        if table is None:
+            return out
+        # Scope entry: enclosing level, filter, handler.
+        for n in range(64):
+            level, filt, handler = (self.img.u32(table + 12 * n + k) for k in (0, 4, 8))
+            if handler is None or not self.img.is_code(handler) or (filt and not self.img.is_code(filt)):
+                break
+            if level != 0xFFFFFFFF and level >= n:
+                break
+            out.append((filt, handler))
+        return out
+
+    def find_eh_frames(self, tables):
+        """Functions whose prologue installs an EH frame (`push thunk`, with
+        thunk `mov eax, funcinfo; jmp handler`) for a catch that returns."""
+        resuming = set()
+        for info, (_, catches) in tables.items():
+            if any(c in self.functions and any(b.end == "ret" for b in self.functions[c].blocks.values()) for c in catches):
+                resuming.add(info)
+        for fn in self.functions.values():
+            for b in fn.blocks.values():
+                for i in b.insns:
+                    if i.mnemonic != "push" or i.operands[0].type != x86.X86_OP_IMM:
+                        continue
+                    thunk = i.operands[0].imm & 0xFFFFFFFF
+                    if self.img.is_code(thunk) and self.img.u8(thunk) == 0xB8 and self.img.u32(thunk + 1) in resuming:
+                        self.eh_frames.add(fn.start)
+            if any(filt for filt, _ in self.seh_scopes(fn)):
+                self.eh_frames.add(fn.start)
 
     _data_ptr_cache = None
 

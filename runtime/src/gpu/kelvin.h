@@ -85,6 +85,7 @@ enum : u32 {
     NV097_SET_MODEL_VIEW_MATRIX = 0x0480,
     NV097_SET_INVERSE_MODEL_VIEW_MATRIX = 0x0580,
     NV097_SET_TEXGEN_PLANE = 0x0840,  // + 0x40 per stage, + 0x10 per coordinate
+    NV097_SET_SPECULAR_PARAMS = 0x09E0,
     NV097_SET_SCENE_AMBIENT_COLOR = 0x0A10,
     NV097_SET_EYE_POSITION = 0x0A50,
     NV097_SET_LIGHT = 0x1000,  // + 0x80 per light
@@ -111,6 +112,7 @@ enum : u32 {
     NV097_ARRAY_ELEMENT32 = 0x1808,
     NV097_DRAW_ARRAYS = 0x1810,
     NV097_INLINE_ARRAY = 0x1818,
+    NV097_SET_EYE_VECTOR = 0x181C,
     NV097_SET_VERTEX_DATA2F_M = 0x1880,
     NV097_SET_VERTEX_DATA2S = 0x1900,
     NV097_SET_VERTEX_DATA4UB = 0x1940,
@@ -137,6 +139,7 @@ enum : u32 {
     NV097_SET_COMBINER_COLOR_OCW = 0x1E40,
     NV097_SET_COMBINER_CONTROL = 0x1E60,
     NV097_SET_SHADER_STAGE_PROGRAM = 0x1E70,
+    NV097_SET_DOT_RGBMAPPING = 0x1E74,
     NV097_SET_SHADER_OTHER_STAGE_INPUT = 0x1E78,
     NV097_SET_TRANSFORM_EXECUTION_MODE = 0x1E94,
     NV097_SET_TRANSFORM_PROGRAM_CXT_WRITE_EN = 0x1E98,
@@ -183,6 +186,7 @@ struct Uniforms {
     float material_emission[4];   // rgb, a = material alpha
     float eye_position[4];
     float fog_params[4];
+    float eye_vec[4];
     struct Light {
         float ambient[4], diffuse[4], specular[4];
         float local_pos[4];    // xyz, w = range

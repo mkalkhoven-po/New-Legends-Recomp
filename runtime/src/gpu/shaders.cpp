@@ -3,7 +3,15 @@
 // shader + register combiners as a fragment shader.
 #include <stdarg.h>
 
+#include <set>
+
 #include "kelvin.h"
+
+// Report a feature the generator only approximates, once per kind.
+static void warn_once(const char* what) {
+    static std::set<std::string> seen;
+    if (seen.insert(what).second) log_msg("[shader] %s", what);
+}
 
 static void add(std::string& s, const char* fmt, ...) {
     char buf[512];
@@ -34,6 +42,7 @@ layout(std140, set = 0, binding = 0) uniform U {
     vec4 materialEmission;
     vec4 eyePosition;
     vec4 fogParams;
+    vec4 eyeVec;
     vec4 lights[72];
 } u;
 )";
@@ -199,6 +208,7 @@ static void row_transform(std::string& s, const char* dst, const char* v, const 
 static const char* material_src(u32 v) { return v == 1 ? "v3" : v == 2 ? "v4" : nullptr; }
 
 static void fixed_function(std::string& s, const Kelvin& k) {
+    if (k.r(NV097_SET_SKIN_MODE)) warn_once("fixed-function skinning not supported");
     s += "    vec4 tPos, cPos;\n";
     row_transform(s, "tPos", "v0", "u.modelView", 0);
     row_transform(s, "cPos", "v0", "u.composite", 0);
@@ -220,6 +230,7 @@ static void fixed_function(std::string& s, const Kelvin& k) {
         for (int i = 0; i < 8; i++) {
             u32 mode = mask >> (2 * i) & 3;
             if (!mode) continue;
+            if (mode == 3) warn_once("spot lights approximated");
             int b = 9 * i;
             add(s, "    { // light %d (%s)\n", i, mode == 1 ? "infinite" : mode == 2 ? "local" : "spot");
             if (mode == 1) {
@@ -235,7 +246,7 @@ static void fixed_function(std::string& s, const Kelvin& k) {
                 }
             }
             s += "        float nl = max(dot(N, L), 0.0), nh = max(dot(N, H), 0.0);\n";
-            s += "        float pf = nl > 0.0 ? pow(nh, 16.0) : 0.0;\n";
+            s += "        float pf = nl > 0.0 ? pow(nh, u.misc.y) : 0.0;\n";
             add(s, "        lAmb += u.lights[%d].rgb * att; lDif += u.lights[%d].rgb * nl * att; lSpec += u.lights[%d].rgb * pf * att;\n",
                 b, b + 1, b + 2);
             s += "    }\n";
@@ -478,43 +489,101 @@ std::string gen_fragment_shader(const Kelvin& k, const TextureDesc* tex, u32 tex
         add(s, "layout(set = 0, binding = %d) uniform sampler2D tex%d;\n", 1 + i, i);
         add(s, "layout(set = 0, binding = %d) uniform samplerCube cube%d;\n", 5 + i, i);
     }
-    s += "layout(location = 0) out vec4 fragColor;\nvoid main() {\n";
+    s += "layout(location = 0) out vec4 fragColor;\n";
+    s += "float sgn8(float x) { return fract(x + 0.5) * 2.0 - 1.0; }\n";
+    s += "void main() {\n";
     s += "    vec4 t0 = vec4(0.0), t1 = vec4(0.0), t2 = vec4(0.0), t3 = vec4(0.0);\n";
     s += "    vec4 vT[4] = vec4[4](vT0, vT1, vT2, vT3);\n";
 
     // Texture shader stages.
     u32 prog = k.r(NV097_SET_SHADER_STAGE_PROGRAM);
+    u32 other = k.r(NV097_SET_SHADER_OTHER_STAGE_INPUT), rgbmap = k.r(NV097_SET_DOT_RGBMAPPING);
+    s += "    float dot0 = 0.0, dot1 = 0.0, dot2 = 0.0, dot3 = 0.0;\n";
     for (int i = 0; i < 4; i++) {
         u32 mode = prog >> (5 * i) & 31;
-        if (!(tex_mask >> i & 1) && mode != 4 && mode != 5) continue;
+        if (mode == 0) continue;
+        // Which earlier stage feeds this one, and how its colour maps to a vector.
+        int in = i == 1 ? 0 : i == 2 ? (other >> 16 & 15) : i == 3 ? (other >> 20 & 15) : 0;
+        char map[48];
+        if (i > 0 && (rgbmap >> (4 * (i - 1)) & 15) == 0) snprintf(map, sizeof map, "t%d.rgb", in);
+        else snprintf(map, sizeof map, "(t%d.rgb * 2.0 - 1.0)", in);
+        auto sample_2d = [&](const char* uv) { add(s, "    t%d = texture(tex%d, (%s) * u.texScale[%d].xy);\n", i, i, uv, i); };
+        char expr[128];
+        bool input_signed = (tex_mask >> in & 1) && (tex[in].filter >> 28);
         switch (mode) {
-        case 0: break;
         case 1:  // PROJECT2D
+            snprintf(expr, sizeof expr, "vT%d.xy / vT%d.w", i, i);
+            sample_2d(expr);
+            break;
         case 2:  // PROJECT3D: volume textures are not supported, sample as 2D
-            add(s, "    t%d = texture(tex%d, vT%d.xy / vT%d.w * u.texScale[%d].xy);\n", i, i, i, i, i);
+            warn_once("volume textures sampled as 2D");
+            snprintf(expr, sizeof expr, "vT%d.xy / vT%d.w", i, i);
+            sample_2d(expr);
             break;
         case 3: add(s, "    t%d = texture(cube%d, vT%d.xyz);\n", i, i, i); break;
         case 4: add(s, "    t%d = clamp(vT%d, 0.0, 1.0);\n", i, i); break;
         case 5:  // CLIP_PLANE: kill the fragment where the selected coordinates are negative
             add(s, "    if (any(lessThan(vT%d, vec4(0.0)))) discard;\n", i);
             break;
-        case 6:  // BUMPENVMAP: offset by the previous stage's (signed) du/dv
-        case 7: {
-            u32 src = i > 0 ? i - 1 : 0;
-            add(s, "    { vec2 d = t%u.rg * 2.0 - 1.0; vec2 uv = vT%d.xy / vT%d.w + vec2(dot(d, u.bumpMat[%d].xz), dot(d, u.bumpMat[%d].yw));\n"
-                   "      t%d = texture(tex%d, uv * u.texScale[%d].xy); }\n",
-                src, i, i, i, i, i, i, i);
+        case 6:  // BUMPENVMAP: offset by an earlier stage's signed du/dv (blue, green)
+        case 7:
+            if (mode == 7) warn_once("bump map luminance ignored");
+            add(s, "    { vec2 d = %s; vec2 uv = vT%d.xy / vT%d.w + vec2(dot(d, u.bumpMat[%d].xz), dot(d, u.bumpMat[%d].yw));\n",
+                input_signed ? (std::string("t") + std::to_string(in) + ".bg").c_str()
+                             : (std::string("(t") + std::to_string(in) + ".bg * 2.0 - 1.0)").c_str(),
+                i, i, i, i);
+            add(s, "      t%d = texture(tex%d, uv * u.texScale[%d].xy); }\n", i, i, i);
             break;
-        }
+        case 9:  // DOT_ST: 2x2 matrix with the previous stage's dot product
+            add(s, "    dot%d = dot(vT%d.xyz, %s);\n", i, i, map);
+            snprintf(expr, sizeof expr, "vec2(dot%d, dot%d)", i - 1, i);
+            sample_2d(expr);
+            break;
+        case 11:  // DOT_RFLCT_DIFF: normal from this stage's and its neighbours' dots
+            add(s, "    dot%d = dot(vT%d.xyz, %s);\n", i, i, map);
+            add(s, "    t%d = texture(cube%d, vec3(dot%d, dot%d, dot(vT%d.xyz, %s)));\n", i, i, i - 1, i, i + 1, map);
+            break;
+        case 12:  // DOT_RFLCT_SPEC: reflect the eye vector (texture coordinate w's)
+        case 18:  // ..._CONST: reflect a constant eye vector
+            add(s, "    dot%d = dot(vT%d.xyz, %s);\n", i, i, map);
+            add(s, "    { vec3 n = vec3(dot%d, dot%d, dot%d);\n", i - 2, i - 1, i);
+            if (mode == 12) add(s, "      vec3 e = vec3(vT%d.w, vT%d.w, vT%d.w);\n", i - 2, i - 1, i);
+            else s += "      vec3 e = u.eyeVec.xyz;\n";
+            add(s, "      t%d = texture(cube%d, 2.0 * n * dot(n, e) / dot(n, n) - e); }\n", i, i);
+            break;
+        case 14:  // DOT_STR_CUBE: 3x3 matrix into a cube map
+            add(s, "    dot%d = dot(vT%d.xyz, %s);\n", i, i, map);
+            add(s, "    t%d = texture(cube%d, vec3(dot%d, dot%d, dot%d));\n", i, i, i - 2, i - 1, i);
+            break;
+        case 15:  // DPNDNT_AR
+            snprintf(expr, sizeof expr, "t%d.ar", in);
+            sample_2d(expr);
+            break;
+        case 16:  // DPNDNT_GB
+            snprintf(expr, sizeof expr, "t%d.gb", in);
+            sample_2d(expr);
+            break;
+        case 17:  // DOTPRODUCT: only feeds later stages
+            add(s, "    dot%d = dot(vT%d.xyz, %s);\n", i, i, map);
+            break;
         default: {
-            static u32 warned;
-            if (!(warned >> mode & 1)) log_msg("[shader] texture shader mode %u not supported", mode);
-            warned |= 1u << mode;
-            add(s, "    t%d = texture(tex%d, vT%d.xy / vT%d.w * u.texScale[%d].xy);\n", i, i, i, i, i);
+            char msg[48];
+            snprintf(msg, sizeof msg, "texture shader mode %u not supported", mode);
+            warn_once(msg);
+            snprintf(expr, sizeof expr, "vT%d.xy / vT%d.w", i, i);
+            sample_2d(expr);
             break;
         }
         }
-        if ((tex_mask >> i & 1) && (tex[i].control0 >> 2 & 1)) add(s, "    if (t%d.a == 0.0) discard;\n", i);
+        if (tex_mask >> i & 1) {
+            // Channels the texture stores as signed bytes.
+            u32 sg = tex[i].filter >> 28;
+            if (sg & 1) add(s, "    t%d.a = sgn8(t%d.a);\n", i, i);
+            if (sg & 2) add(s, "    t%d.r = sgn8(t%d.r);\n", i, i);
+            if (sg & 4) add(s, "    t%d.g = sgn8(t%d.g);\n", i, i);
+            if (sg & 8) add(s, "    t%d.b = sgn8(t%d.b);\n", i, i);
+            if (tex[i].control0 >> 2 & 1) add(s, "    if (t%d.a == 0.0) discard;\n", i);
+        }
     }
 
     // Register combiners.

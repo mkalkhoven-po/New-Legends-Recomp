@@ -132,9 +132,17 @@ u64 rt_rdtsc(Ctx*) {
     return (u64)((double)now.QuadPart * (733333333.0 / (double)freq.QuadPart));
 }
 
+constexpr u32 INT_DEBUG_SERVICE = 0x2D, DEBUG_SERVICE_PRINT = 1;
+
 void rt_int(Ctx* c, u32 addr, u32 vector) {
-    if (vector == 3) {  // int3: debugger breakpoint, no debugger attached
-        log_msg("int3 at %08X ignored", addr);
+    if (vector == 3) return;  // int3: debugger breakpoint, no debugger attached
+    if (vector == INT_DEBUG_SERVICE) {
+        // Kernel debug service, how OutputDebugString reaches a debugger:
+        // eax = service, ecx = ANSI_STRING {length, maximum, buffer}.
+        if (c->eax == DEBUG_SERVICE_PRINT) {
+            u32 len = rd16(c->ecx), text = rd32(c->ecx + 4);
+            log_msg("[debug] %.*s", (int)len, (const char*)gptr(text));
+        }
         return;
     }
     fatal("software interrupt %02X at %08X", vector, addr);

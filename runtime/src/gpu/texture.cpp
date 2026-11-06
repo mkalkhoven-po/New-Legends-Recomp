@@ -34,6 +34,9 @@ static u32 p_a8(const u8* p) { return rgb(p[0], 255, 255, 255); }
 static u32 p_a8y8(const u8* p) { return rgb(p[0], p[1], p[1], p[1]); }
 static u32 p_g8b8(const u8* p) { return rgb(255, 0, p[1], p[0]); }
 static u32 p_r8b8(const u8* p) { return rgb(255, p[1], 0, p[0]); }
+static u32 p_y16(const u8* p) { return rgb(255, p[1], p[1], p[1]); }
+static u32 p_r5g5b5a1(const u8* p) { u32 v = u16at(p); return rgb(v & 1 ? 255 : 0, x5(v >> 11), x5(v >> 6 & 31), x5(v >> 1 & 31)); }
+static u32 p_r4g4b4a4(const u8* p) { u32 v = u16at(p); return rgb(x4(v & 15), x4(v >> 12), x4(v >> 8 & 15), x4(v >> 4 & 15)); }
 
 static const std::map<u32, Fmt> kFormats = {
     {0x00, {K_SWZ, 8, p_y8}},        {0x01, {K_SWZ, 8, p_ay8}},       {0x02, {K_SWZ, 16, p_a1r5g5b5}},
@@ -47,6 +50,10 @@ static const std::map<u32, Fmt> kFormats = {
     {0x27, {K_SWZ, 16, p_r6g5b5}},   {0x28, {K_SWZ, 16, p_g8b8}},     {0x29, {K_SWZ, 16, p_r8b8}},
     {0x3A, {K_SWZ, 32, p_a8b8g8r8}}, {0x3B, {K_SWZ, 32, p_b8g8r8a8}}, {0x3C, {K_SWZ, 32, p_r8g8b8a8}},
     {0x3F, {K_LIN, 32, p_a8b8g8r8}}, {0x40, {K_LIN, 32, p_b8g8r8a8}}, {0x41, {K_LIN, 32, p_r8g8b8a8}},
+    {0x14, {K_LIN, 8, p_y8}},        {0x16, {K_LIN, 16, p_r8b8}},     {0x17, {K_LIN, 16, p_g8b8}},
+    {0x18, {K_LIN, 16, p_g8b8}},     {0x32, {K_SWZ, 16, p_y16}},      {0x35, {K_LIN, 16, p_y16}},
+    {0x37, {K_LIN, 16, p_r6g5b5}},   {0x38, {K_SWZ, 16, p_r5g5b5a1}}, {0x39, {K_SWZ, 16, p_r4g4b4a4}},
+    {0x3D, {K_LIN, 16, p_r5g5b5a1}}, {0x3E, {K_LIN, 16, p_r4g4b4a4}},
 };
 
 static const Fmt* fmt_of(u32 f) {

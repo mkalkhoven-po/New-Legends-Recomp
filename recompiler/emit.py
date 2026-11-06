@@ -8,7 +8,7 @@ label.
 """
 from capstone import x86
 
-from .analysis import JCC
+from .analysis import EXCEPT_BLOCK_CALL, JCC
 
 REG32 = ("eax", "ecx", "edx", "ebx", "esp", "ebp", "esi", "edi")
 REG16 = {"ax": "eax", "cx": "ecx", "dx": "edx", "bx": "ebx", "sp": "esp", "bp": "ebp", "si": "esi", "di": "edi"}
@@ -1047,11 +1047,12 @@ MMIO_ACCESSORS = ("rd8", "rd16", "rd32", "wr8", "wr16", "wr32")
 
 
 class FunctionEmitter:
-    def __init__(self, fn, known, overrides=None, mmio=False):
+    def __init__(self, fn, known, overrides=None, mmio=False, eh_frame=False):
         self.fn = fn
         self.known = known  # set of function starts that have a definition
         self.overrides = overrides or {}
         self.mmio = mmio  # may touch hardware registers: checked accessors
+        self.eh_frame = eh_frame  # a catch block resumes in this function's frame
         self.unsupported = []
 
     def callee(self, va):
@@ -1068,6 +1069,10 @@ class FunctionEmitter:
     def call(self, ins):
         ret = hexu(ins.address + ins.size)
         op = ins.operands[0]
+        if ins.address == EXCEPT_BLOCK_CALL:
+            ie = InsnEmitter(self, ins)
+            tgt = ie.rd(op, 4)
+            return ie.out + [f"rt_except_resume(c, {tgt}, c->ebx);"]
         if op.type == x86.X86_OP_IMM:
             tgt = op.imm & 0xFFFFFFFF
             if tgt == ins.address + ins.size:  # call $+5: pushes eip
@@ -1111,6 +1116,11 @@ class FunctionEmitter:
                 L.append(f"    // {term.address:08X} {term.mnemonic} {term.op_str}")
             L.extend("    " + x for x in self.terminator(b, term, nxt))
         L.append("}")
+        if self.eh_frame:
+            # The body runs under a host frame a thrown exception can resume at.
+            name = fname(fn.start)
+            L[0] = f"static void body_{name}(Ctx* c) {{"
+            L.append(f"void {name}(Ctx* c) {{ rt_eh_frame(c, body_{name}); }}")
         if self.mmio:
             L = [f"#define {n} io_{n}" for n in MMIO_ACCESSORS] + L + [f"#undef {n}" for n in MMIO_ACCESSORS]
         return "\n".join(L)

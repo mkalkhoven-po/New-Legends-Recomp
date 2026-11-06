@@ -48,12 +48,27 @@ static void print_host_stack(CONTEXT* ctx, HANDLE thread = GetCurrentThread()) {
     }
 }
 
+// The game reads past the end of allocations (a texture whose data is smaller
+// than its header claims). On the console the next pages are usually mapped;
+// here a block can end at the edge of the address space in use. Give reads in
+// the virtual allocation range a zero page and carry on.
+constexpr u32 VIRT_LO = 0x10000000u, VIRT_HI = 0x80000000u, PAGE_MASK = 0xFFFu;
+static bool map_overread(EXCEPTION_RECORD* r) {
+    u64 addr = r->ExceptionInformation[1], base = (u64)GUEST_BASE;
+    if (r->ExceptionInformation[0] != 0 || addr < base + VIRT_LO || addr >= base + VIRT_HI) return false;
+    if (!VirtualAlloc((void*)(addr & ~(u64)PAGE_MASK), PAGE_MASK + 1, MEM_COMMIT, PAGE_READWRITE)) return false;
+    static LONG logged;
+    if (InterlockedIncrement(&logged) <= 8) log_msg("[memory] guest read past allocations at %08llX: mapped a zero page", addr - base);
+    return true;
+}
+
 static LONG WINAPI on_exception(EXCEPTION_POINTERS* ep) {
     DWORD code = ep->ExceptionRecord->ExceptionCode;
     // Only fatal hardware exceptions; C++/debugger exceptions pass through.
     if (code != EXCEPTION_ACCESS_VIOLATION && code != EXCEPTION_INT_DIVIDE_BY_ZERO &&
         code != EXCEPTION_INT_OVERFLOW && code != EXCEPTION_STACK_OVERFLOW && code != EXCEPTION_ILLEGAL_INSTRUCTION)
         return EXCEPTION_CONTINUE_SEARCH;
+    if (code == EXCEPTION_ACCESS_VIOLATION && map_overread(ep->ExceptionRecord)) return EXCEPTION_CONTINUE_EXECUTION;
     static LONG once;
     if (InterlockedExchange(&once, 1)) return EXCEPTION_CONTINUE_SEARCH;
 
@@ -106,13 +121,24 @@ static void dump_threads() {
     fflush(stderr);
 }
 
-// NL_WATCHDOG=seconds: dump all guest threads after that long (and every
-// further period), to see where a hang sits.
+// NL_WATCHDOG=seconds: when no frame was presented for that long, dump all
+// guest threads, to see where a hang sits.
+u32 vkb_frame_no();
+static volatile bool g_watchdog_off;
+void crash_watchdog_stop() { g_watchdog_off = true; }
+
 static DWORD WINAPI watchdog(void* p) {
     DWORD ms = (DWORD)(uintptr_t)p;
+    u32 last = ~0u;
     for (;;) {
         Sleep(ms);
-        fprintf(stderr, "\n*** watchdog: thread dump\n");
+        u32 now = vkb_frame_no();
+        if (g_watchdog_off) return 0;
+        if (now != last) {
+            last = now;
+            continue;
+        }
+        fprintf(stderr, "\n*** watchdog: no frames for %lu s (frame %u)\n", ms / 1000, now);
         dump_threads();
     }
 }

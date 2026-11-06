@@ -166,13 +166,15 @@ extern u64 g_sig_gen;
 template <class F>
 bool sched_wait(F ready, s64 deadline_ms) {
     for (;;) {
-        if (ready()) return true;
-        if (deadline_ms >= 0 && now_ms() >= deadline_ms) return false;
+        // Read the generation before testing: device threads signal without
+        // the GIL, and a signal between test and read would be lost.
         u64 gen;
         {
             std::lock_guard<std::mutex> lk(g_sig_mutex);
             gen = g_sig_gen;
         }
+        if (ready()) return true;
+        if (deadline_ms >= 0 && now_ms() >= deadline_ms) return false;
         gil_unlock();
         {
             std::unique_lock<std::mutex> lk(g_sig_mutex);

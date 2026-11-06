@@ -195,10 +195,15 @@ static DWORD WINAPI thread_main(void* p) {
     thread_bind(s.t);
     sched_wait([&] { return !g_suspended[s.t->kthread]; }, -1);
     Ctx* c = &s.t->ctx;
-    if (s.system_routine)
-        guest_call(c, s.system_routine, {s.start_routine, s.start_context}, true);
-    else
-        guest_call(c, s.start_routine, {s.start_context}, true);
+    try {
+        if (s.system_routine)
+            guest_call(c, s.system_routine, {s.start_routine, s.start_context}, true);
+        else
+            guest_call(c, s.start_routine, {s.start_context}, true);
+    } catch (const GuestResume& r) {
+        guest_backtrace(c);
+        fatal("guest catch continuation %08X has no resumable frame", r.target);
+    }
     thread_exit(s.t, 0);
 }
 

@@ -75,5 +75,10 @@ void vkb_clear(u32 flags, u32 color_argb, float depth, u32 stencil, int x0, int 
 void vkb_draw(const DrawCall& d);
 // End of frame: show the render target at `color_addr`.
 void vkb_present(u32 color_addr);
+// A rectangle between surfaces. Done: handled on render targets. Memory: not
+// render targets, the caller copies guest memory. SourceIsTarget: the pixels
+// are only in a render target and the destination is plain memory.
+enum class BlitResult { Done, Memory, SourceIsTarget };
+BlitResult vkb_blit(u32 src, u32 dst, u32 sx, u32 sy, u32 dx, u32 dy, u32 w, u32 h, u32 src_pitch, u32 dst_pitch, u32 bpp);
 u32 vkb_frame_no();
 u32 vkb_shader_id(const std::string& src, bool fragment);

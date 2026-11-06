@@ -2,6 +2,7 @@
 # The original stays available as f_ADDRESS for the host code to call.
 
 00173A90 hle_unreal_error_serialize   # FOutputDeviceError::Serialize: log the message first
+0018DF8F hle_JumpToContinuation       # CRT: leaves a catch block for an outer guest frame
 
 # XAPI controller API (XPP section) -> host XInput, runtime/src/hle/input.cpp
 00222AB8 hle_XInitDevices

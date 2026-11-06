@@ -19,3 +19,15 @@ void hle_unreal_error_serialize(Ctx* c) {
     f_00173A90(c);
 }
 
+
+// CRT _JumpToContinuation(void* target, EHRegistrationNode* frame): leave a
+// finished catch block. Drop the top EH frame, restore the frame's esp (saved
+// just below it) and ebp (the frame sits 12 bytes under it), and go on at the
+// continuation, which is in an outer guest function.
+void hle_JumpToContinuation(Ctx* c) {
+    u32 target = rd32(c->esp + 4), frame = rd32(c->esp + 8);
+    wr32(c->fs_base, rd32(rd32(c->fs_base)));
+    c->esp = rd32(frame - 4);
+    c->ebp = frame + 12;
+    throw GuestResume{target};
+}

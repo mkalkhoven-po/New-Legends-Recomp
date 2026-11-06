@@ -107,6 +107,7 @@ private:
 static std::mutex g_mem_m;
 static RangeAllocator g_virt, g_contig, g_system, g_pool;
 static u64 g_virt_committed;
+static bool g_trace_vmem = getenv("NL_TRACE_VMEM") != nullptr;
 
 static void host_commit(u32 a, u32 size) {
     if (!VirtualAlloc(gptr(a), size, MEM_COMMIT, PAGE_READWRITE)) fatal("commit %08X+%X failed", a, size);
@@ -167,6 +168,7 @@ static u32 NtAllocateVirtualMemory(Ctx*, KArgs a) {
         base = lo;
         size = hi - lo;
     }
+    if (g_trace_vmem) log_msg("[vmem] alloc %08X+%X type %X", base, size, type);
     wr32(base_ptr, base);
     wr32(size_ptr, size);
     return STATUS_SUCCESS;
@@ -190,6 +192,7 @@ static u32 NtFreeVirtualMemory(Ctx*, KArgs a) {
         base = lo;
         size = hi - lo;
     }
+    if (g_trace_vmem) log_msg("[vmem] free %08X+%X type %X", base, size, type);
     wr32(base_ptr, base);
     wr32(size_ptr, size);
     return STATUS_SUCCESS;

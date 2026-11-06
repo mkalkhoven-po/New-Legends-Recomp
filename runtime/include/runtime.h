@@ -30,6 +30,11 @@ void dispatch_init();
 GuestFunc dispatch_lookup(u32 addr);
 // Print likely return addresses from the guest stack and the registers.
 void guest_backtrace(Ctx* c);
+// Thrown (host C++) to leave nested guest calls for the guest frame a catch
+// block continues in. esp and ebp already hold that frame's values.
+struct GuestResume {
+    u32 target;
+};
 
 // Kernel import thunks are patched to KERNEL_THUNK_BASE | ordinal; an
 // indirect call to such a value lands in the HLE kernel.
