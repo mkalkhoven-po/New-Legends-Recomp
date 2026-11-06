@@ -165,9 +165,9 @@ static void translate_program(std::string& s, const Kelvin& k) {
             std::string e;
             switch (ilu) {
             case 1: e = c; break;
-            case 2: e = "vec4(1.0 / " + c + ".x)"; break;
+            case 2: e = "vec4(rcp(" + c + ".x))"; break;
             case 3: e = "vec4(rcc(" + c + ".x))"; break;
-            case 4: e = "vec4(inversesqrt(abs(" + c + ".x)))"; break;
+            case 4: e = "vec4(rsq(" + c + ".x))"; break;
             case 5: e = "vexp(" + c + ".x)"; break;
             case 6: e = "vlog(" + c + ".x)"; break;
             case 7: e = "vlit(" + c + ")"; break;
@@ -335,6 +335,11 @@ std::string gen_vertex_shader(const Kelvin& k, VsInputs in) {
         if (in.present >> i & 1) add(s, "layout(location = %d) in %s inV%d;\n", i, in.packed >> i & 1 ? "uint" : "vec4", i);
     varyings(s, k, "out");
     s += R"(
+// Reciprocals saturate: unused light slots divide by zero and multiply the
+// result by a zero colour, which has to stay 0 instead of turning into NaN.
+const float VP_HUGE = 1.84467e+19;
+float rcp(float x) { return x == 0.0 ? VP_HUGE : clamp(1.0 / x, -VP_HUGE, VP_HUGE); }
+float rsq(float x) { return x == 0.0 ? VP_HUGE : min(inversesqrt(abs(x)), VP_HUGE); }
 float rcc(float x) {
     float r = 1.0 / x;
     float m = clamp(abs(r), 5.42101e-20, 1.84467e+19);
@@ -383,7 +388,7 @@ void main() {
     // w is kept for perspective-correct interpolation.
     s += R"(
     float w = oPos.w;
-    if (isinf(w) || isnan(w) || w == 0.0) w = 1.0;
+    if (isinf(w) || isnan(w) || w == 0.0 || abs(w) >= VP_HUGE) w = 1.0;
     w = sign(w) * clamp(abs(w), 5.42101e-20, 1.84467e+19);
     vec2 ndc = oPos.xy / u.surface.xy * 2.0 - 1.0;
     gl_Position = vec4(ndc * w, oPos.z * u.surface.z * w, w);
@@ -393,6 +398,11 @@ void main() {
     vT0 = oT0; vT1 = oT1; vT2 = oT2; vT3 = oT3;
 }
 )";
+    // NL_DEBUG_NAN: NaN vertex colours show up magenta.
+    static bool nan_check = getenv("NL_DEBUG_NAN") != nullptr;
+    if (nan_check) {
+        s.insert(s.rfind('}'), "    if (any(isnan(oD0))) vD0 = vec4(1.0, 0.0, 1.0, 1.0);\n");
+    }
     return s;
 }
 

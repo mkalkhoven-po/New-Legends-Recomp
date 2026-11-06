@@ -42,10 +42,28 @@ def launch_page(name):
     return path
 
 
+def scan_frame(path):
+    """Share of pure black and of magenta (NaN colour, NL_DEBUG_NAN) pixels,
+    leaving out the letterbox rows at the top and bottom."""
+    data = open(path, "rb").read()
+    off = struct.unpack_from("<I", data, 10)[0]
+    w, h = struct.unpack_from("<ii", data, 18)
+    h = abs(h)
+    black = magenta = total = 0
+    for y in range(h // 8, h * 7 // 8, 4):
+        row = data[off + y * w * 4 : off + (y + 1) * w * 4]
+        for x in range(0, len(row), 16):
+            b, g, r = row[x], row[x + 1], row[x + 2]
+            total += 1
+            black += r < 3 and g < 3 and b < 3
+            magenta += r > 250 and g < 5 and b > 250
+    return black / total, magenta / total
+
+
 def run_map(name, seconds, monkey):
     log_path = os.path.join(OUT, name + ".log")
     shutil.rmtree("frames", ignore_errors=True)
-    env = dict(os.environ, NL_WATCHDOG="20", NL_DUMP_FRAMES="300", NL_MONKEY=str(monkey),
+    env = dict(os.environ, NL_WATCHDOG="20", NL_DUMP_FRAMES="120", NL_MONKEY=str(monkey), NL_DEBUG_NAN="1",
                NL_LAUNCH_DATA=launch_page(name))
     start = time.time()
     with open(log_path, "wb") as log:
@@ -63,6 +81,19 @@ def run_map(name, seconds, monkey):
         shutil.copy(frames[-1], os.path.join(OUT, name + ".bmp"))
         convert(os.path.join(OUT, name + ".bmp"))
         os.remove(os.path.join(OUT, name + ".bmp"))
+    # The frame with the most pure black, skipping loading screens (which are
+    # nearly all black) and the first seconds.
+    worst = (0, None)
+    magenta = 0
+    for f in frames[2:]:
+        black, nan = scan_frame(f)
+        magenta = max(magenta, nan)
+        if worst[0] < black < 0.8:
+            worst = (black, f)
+    if worst[1]:
+        shutil.copy(worst[1], os.path.join(OUT, name + "_black.bmp"))
+        convert(os.path.join(OUT, name + "_black.bmp"))
+        os.remove(os.path.join(OUT, name + "_black.bmp"))
     problems = []
     for pat in (r"^FATAL.*$", r"^\*\*\* host.*$", r"^\[unreal\] appError.*$", r"^\[texture\].*$", r"^\[shader\].*$",
                 r"^unimplemented instruction.*$"):
@@ -75,7 +106,7 @@ def run_map(name, seconds, monkey):
         status = f"HANG{hangs}"
     elif exited == 0:
         status = "exit"
-    return status, time.time() - start, frame, problems
+    return status, time.time() - start, frame, worst[0], magenta, problems
 
 
 def main():
@@ -88,8 +119,8 @@ def main():
     os.makedirs(OUT, exist_ok=True)
     with open(os.path.join(OUT, "report.txt"), "a") as report:
         for m in maps:
-            status, took, frame, problems = run_map(m, args.seconds, args.monkey)
-            line = f"{m:24} {status:6} {took:4.0f}s frame {frame}"
+            status, took, frame, black, nan, problems = run_map(m, args.seconds, args.monkey)
+            line = f"{m:24} {status:6} {took:4.0f}s frame {frame:5} black {black:4.0%} nan {nan:4.0%}"
             print(line, flush=True)
             report.write(line + "\n")
             for p in problems:

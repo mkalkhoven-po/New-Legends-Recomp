@@ -443,7 +443,9 @@ static void fill_uniforms(const DrawCall& d, const RenderTargets& rt, Uniforms& 
         argb_to_vec4(g_k.r(NV097_SET_COMBINER_FACTOR0 + 4 * i), u.factor0[i]);
         argb_to_vec4(g_k.r(NV097_SET_COMBINER_FACTOR1 + 4 * i), u.factor1[i]);
     }
-    argb_to_vec4(g_k.r(NV097_SET_FOG_COLOR), u.fog_color);
+    // Unlike the other colours, this method takes its channels as ABGR.
+    u32 fog = g_k.r(NV097_SET_FOG_COLOR);
+    argb_to_vec4((fog & 0xFF00FF00u) | (fog >> 16 & 0xFF) | (fog & 0xFF) << 16, u.fog_color);
     u.misc[0] = (float)(g_k.r(NV097_SET_ALPHA_REF) & 0xFF);
     u.misc[1] = specular_power(g_k.f(NV097_SET_SPECULAR_PARAMS));
     for (u32 i = 0; i < 4; i++) {
@@ -554,6 +556,8 @@ static void flush_draw() {
     }
     static const char* only_vs = getenv("NL_ONLY_VS");
     if (only_vs && d.vs.find(only_vs) == std::string::npos) return;
+    static const char* only_fs = getenv("NL_ONLY_FS");
+    if (only_fs && d.fs.find(only_fs) == std::string::npos) return;
     bind_targets();
     vkb_draw(d);
 }
