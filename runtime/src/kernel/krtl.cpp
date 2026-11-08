@@ -266,7 +266,6 @@ static u32 XcSHAFinal(Ctx*, KArgs a) {
     return 0;
 }
 
-// --------------------------------------------------------------- exceptions
 // ------------------------------------------------------------- exceptions
 // Structured exception dispatch as ntdll does it: the handlers on the fs:[0]
 // chain are guest code (MSVC's __CxxFrameHandler among them) and do the real
@@ -302,9 +301,35 @@ static std::string exception_detail(u32 rec) {
     return detail;
 }
 
-// Call an EXCEPTION_ROUTINE (cdecl).
-static u32 call_handler(Ctx* c, u32 frame, u32 rec, u32 context, u32 dispatcher) {
-    return guest_call(c, rd32(frame + 4), {rec, frame, context, dispatcher}, false);
+// Call an EXCEPTION_ROUTINE (cdecl). As ntdll's ExecuteHandler, this puts a
+// marker frame of its own on the chain for the call: next, handler, establisher
+// frame. The CRT relies on it: _UnwindNestedFrames links the frame that is on top
+// back in after an unwind, and _JumpToContinuation takes it off again. Without a
+// marker the top frame is the one being handled and ends up pointing at itself.
+// The markers answer for a dispatcher that is interrupted, in call_handler below.
+constexpr u32 MARKER_EXCEPTION = 0xFFFF0001u, MARKER_UNWIND = 0xFFFF0002u, MARKER_BYTES = 12;
+
+static u32 call_handler(Ctx* c, u32 frame, u32 rec, u32 context, u32 dispatcher, u32 marker_kind) {
+    u32 handler = rd32(frame + 4);
+    if (handler == MARKER_EXCEPTION || handler == MARKER_UNWIND) {
+        bool unwinding = rd32(rec + 4) & (EXCEPTION_UNWINDING_ | EXCEPTION_EXIT_UNWIND_);
+        if (unwinding != (handler == MARKER_UNWIND)) return ContinueSearch;
+        wr32(dispatcher, rd32(frame + 8));
+        return unwinding ? CollidedUnwind : NestedException;
+    }
+    if (g_trace_eh) log_msg("[eh] frame %08X next %08X handler %08X flags %X", frame, rd32(frame), handler, rd32(rec + 4));
+    u32 saved_esp = c->esp;
+    c->esp -= MARKER_BYTES;
+    u32 marker = c->esp;
+    wr32(marker, rd32(c->fs_base));
+    wr32(marker + 4, marker_kind);
+    wr32(marker + 8, frame);
+    wr32(c->fs_base, marker);
+    u32 r = guest_call(c, handler, {rec, frame, context, dispatcher}, false);
+    wr32(c->fs_base, rd32(marker));
+    c->esp = saved_esp;
+    if (g_trace_eh) log_msg("[eh] frame %08X -> %u", frame, r);
+    return r;
 }
 
 static u32 RtlRaiseException(Ctx* c, KArgs a) {
@@ -320,7 +345,7 @@ static u32 RtlRaiseException(Ctx* c, KArgs a) {
     memset(gptr(context), 0, CONTEXT_BYTES + DISPATCHER_CONTEXT_BYTES);
     u32 nested_end = 0;
     for (u32 frame = rd32(c->fs_base); frame != EH_CHAIN_END; frame = rd32(frame)) {
-        u32 r = call_handler(c, frame, rec, context, dispatcher);
+        u32 r = call_handler(c, frame, rec, context, dispatcher, MARKER_EXCEPTION);
         if (frame == nested_end) {
             wr32(rec + 4, rd32(rec + 4) & ~EXCEPTION_NESTED_CALL_);
             nested_end = 0;
@@ -359,7 +384,7 @@ static u32 RtlUnwind(Ctx* c, KArgs a) {
     wr32(rec + 4, rd32(rec + 4) | EXCEPTION_UNWINDING_ | (target ? 0 : EXCEPTION_EXIT_UNWIND_));
     u32 frame = rd32(c->fs_base);
     while (frame != EH_CHAIN_END && frame != target) {
-        u32 r = call_handler(c, frame, rec, context, dispatcher);
+        u32 r = call_handler(c, frame, rec, context, dispatcher, MARKER_UNWIND);
         if (r == CollidedUnwind) frame = rd32(dispatcher);
         else if (r != ContinueSearch) fatal("RtlUnwind: handler returned %u", r);
         frame = rd32(frame);

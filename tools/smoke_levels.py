@@ -1,11 +1,15 @@
 ﻿"""Boot each level directly and report crashes, hangs and engine errors.
 
-Usage: python tools/smoke_levels.py [--seconds N] [--monkey SEED] [map ...]
+Usage: python tools/smoke_levels.py [--seconds N] [--monkey SEED] [--tour SEC] [--keep N] [map ...]
 
 The game switches levels by relaunching itself with "-relaunch <map>" in the
 launch data page; this starts the runtime the same way, with random input
 (NL_MONKEY). Maps default to every game/*.lin. Results go to smoke/: one log
 and one screenshot per map, plus report.txt.
+
+--tour puts the player, in god mode, on another navigation point or trigger of
+the level every SEC seconds, to reach the whole level and set off its scripts.
+--keep saves N evenly spaced screenshots per map as smoke/keep/<map>_<i>.png.
 """
 import argparse
 import glob
@@ -60,11 +64,19 @@ def scan_frame(path):
     return black / total, magenta / total
 
 
-def run_map(name, seconds, monkey):
+def save_png(bmp, stem):
+    shutil.copy(bmp, stem + ".bmp")
+    convert(stem + ".bmp")
+    os.remove(stem + ".bmp")
+
+
+def run_map(name, seconds, monkey, tour, keep):
     log_path = os.path.join(OUT, name + ".log")
     shutil.rmtree("frames", ignore_errors=True)
     env = dict(os.environ, NL_WATCHDOG="20", NL_DUMP_FRAMES="120", NL_MONKEY=str(monkey), NL_DEBUG_NAN="1",
                NL_LAUNCH_DATA=launch_page(name))
+    if tour:
+        env.update(NL_TOUR=str(tour), NL_EXEC="1:god")
     start = time.time()
     with open(log_path, "wb") as log:
         p = subprocess.Popen([os.path.abspath("build/newlegends.exe")], stdout=log, stderr=log, env=env)
@@ -78,9 +90,7 @@ def run_map(name, seconds, monkey):
     frame = 0
     if frames:
         frame = int(os.path.basename(frames[-1])[:-4])
-        shutil.copy(frames[-1], os.path.join(OUT, name + ".bmp"))
-        convert(os.path.join(OUT, name + ".bmp"))
-        os.remove(os.path.join(OUT, name + ".bmp"))
+        save_png(frames[-1], os.path.join(OUT, name))
     # The frame with the most pure black, skipping loading screens (which are
     # nearly all black) and the first seconds.
     worst = (0, None)
@@ -91,9 +101,11 @@ def run_map(name, seconds, monkey):
         if worst[0] < black < 0.8:
             worst = (black, f)
     if worst[1]:
-        shutil.copy(worst[1], os.path.join(OUT, name + "_black.bmp"))
-        convert(os.path.join(OUT, name + "_black.bmp"))
-        os.remove(os.path.join(OUT, name + "_black.bmp"))
+        save_png(worst[1], os.path.join(OUT, name + "_black"))
+    if frames:
+        os.makedirs(os.path.join(OUT, "keep"), exist_ok=True)
+        for i in range(keep):
+            save_png(frames[(i + 1) * len(frames) // (keep + 1)], os.path.join(OUT, "keep", f"{name}_{i}"))
     problems = []
     for pat in (r"^FATAL.*$", r"^\*\*\* host.*$", r"^\[unreal\] appError.*$", r"^\[texture\].*$", r"^\[shader\].*$",
                 r"^unimplemented instruction.*$"):
@@ -106,21 +118,27 @@ def run_map(name, seconds, monkey):
         status = f"HANG{hangs}"
     elif exited == 0:
         status = "exit"
-    return status, time.time() - start, frame, worst[0], magenta, problems
+    stops = len(re.findall(r"^\[tour\] \d+/", text, flags=re.M))
+    levels = re.findall(r"^\[tour\] (\S+): \d+ stops", text, flags=re.M)
+    return status, time.time() - start, frame, worst[0], magenta, stops, levels, problems
 
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--seconds", type=int, default=75)
     ap.add_argument("--monkey", type=int, default=1)
+    ap.add_argument("--tour", type=float, default=0)
+    ap.add_argument("--keep", type=int, default=0)
     ap.add_argument("maps", nargs="*")
     args = ap.parse_args()
     maps = args.maps or sorted(os.path.basename(p)[:-4] for p in glob.glob("game/*.lin"))
     os.makedirs(OUT, exist_ok=True)
     with open(os.path.join(OUT, "report.txt"), "a") as report:
         for m in maps:
-            status, took, frame, black, nan, problems = run_map(m, args.seconds, args.monkey)
+            status, took, frame, black, nan, stops, levels, problems = run_map(m, args.seconds, args.monkey, args.tour, args.keep)
             line = f"{m:24} {status:6} {took:4.0f}s frame {frame:5} black {black:4.0%} nan {nan:4.0%}"
+            if args.tour:
+                line += f" stops {stops:4} {' > '.join(x[:-1] if x.endswith(':') else x for x in levels)}"
             print(line, flush=True)
             report.write(line + "\n")
             for p in problems:

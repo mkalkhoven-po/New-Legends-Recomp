@@ -2,6 +2,9 @@
 # The original stays available as f_ADDRESS for the host code to call.
 
 00173A90 hle_unreal_error_serialize   # FOutputDeviceError::Serialize: log the message first
+00011210 hle_log_stub                 # Null log device Serialize: NL_TRACE_LOG
+000827F0 hle_viewport_serialize       # UViewport::Serialize: logs NL_EXEC output
+0016ED00 hle_viewport_update_input    # UXboxViewport::UpdateInput: runs NL_EXEC test commands
 0018DF8F hle_JumpToContinuation       # CRT: leaves a catch block for an outer guest frame
 
 # XAPI controller API (XPP section) -> host XInput, runtime/src/hle/input.cpp
@@ -76,3 +79,4 @@
 001E3574 hle_stream_Process
 001E3488 hle_stream_Discontinuity
 001E34D4 hle_stream_Flush
+0006A540 hle_actor_set_collision      # AActor::SetCollision: survives the door bug in CheckEncroachment

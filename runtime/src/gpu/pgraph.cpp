@@ -98,7 +98,20 @@ static RenderTargets current_targets() {
 static void bind_targets() {
     vkb_set_targets(current_targets());
     u32 ch = g_k.r(NV097_SET_SURFACE_CLIP_HORIZONTAL), cv = g_k.r(NV097_SET_SURFACE_CLIP_VERTICAL);
-    vkb_set_scissor(ch & 0xFFFF, cv & 0xFFFF, ch >> 16, cv >> 16);
+    int x0 = ch & 0xFFFF, y0 = cv & 0xFFFF, x1 = x0 + (ch >> 16), y1 = y0 + (cv >> 16);
+    // D3D's viewport and scissor end up in window clip region 0, as an inclusive
+    // rectangle. The dialog portraits depend on it: they draw the whole pawn.
+    u32 wh = g_k.r(NV097_SET_WINDOW_CLIP_HORIZONTAL), wv = g_k.r(NV097_SET_WINDOW_CLIP_VERTICAL);
+    x0 = (std::max)(x0, (int)(wh & 0xFFF));
+    y0 = (std::max)(y0, (int)(wv & 0xFFF));
+    x1 = (std::min)(x1, (int)(wh >> 16 & 0xFFF) + 1);
+    y1 = (std::min)(y1, (int)(wv >> 16 & 0xFFF) + 1);
+    vkb_set_scissor(x0, y0, x1 - x0, y1 - y0);
+    static bool warned;
+    if (!warned && (g_k.r(NV097_SET_WINDOW_CLIP_TYPE) || g_k.r(NV097_SET_WINDOW_CLIP_HORIZONTAL + 4))) {
+        warned = true;
+        log_msg("[pgraph] window clip: exclusive mode or more regions are not handled");
+    }
 }
 
 static void clear_surface(u32 flags) {
