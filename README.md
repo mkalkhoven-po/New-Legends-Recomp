@@ -85,5 +85,8 @@ your graphics card and driver version.
 ## Legal
 
 New Legends is © its respective owners. This project is not affiliated with or endorsed by
-them. No game data is distributed; you must own the game. Licenses of the open-source parts
-are listed in `THIRD_PARTY_NOTICES.md`.
+them. No game data is distributed; you must own the game.
+
+The project's own source code is under the MIT License (`LICENSE`). That license does not
+cover the game or the recompiled game code built into `newlegends.exe`. Licenses of the
+open-source parts are listed in `THIRD_PARTY_NOTICES.md`.
