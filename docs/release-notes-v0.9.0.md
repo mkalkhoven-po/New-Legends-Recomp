@@ -1,4 +1,4 @@
-# New Legends Recomp 0.1.0 (preview)
+# New Legends Recomp 0.9.0 (preview)
 
 The first test release: the whole game runs natively on Windows. You need the files from
 your own New Legends (USA) disc; see the README.
