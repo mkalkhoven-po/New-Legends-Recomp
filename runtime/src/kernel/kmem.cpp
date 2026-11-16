@@ -8,6 +8,7 @@
 
 #include <map>
 #include <mutex>
+#include <vector>
 
 #include "kernel.h"
 
@@ -22,6 +23,8 @@ constexpr u32 MEM_FREE_ = 0x10000, MEM_PRIVATE_ = 0x20000, MEM_TOP_DOWN_ = 0x100
 constexpr u32 PAGE_READWRITE_ = 4;
 
 static u32 align_up(u32 v, u32 a) { return (v + a - 1) & ~(a - 1); }
+void crash_watch_page(u32 a, u32 size);  // crash.cpp (NL_WATCH_WRITE)
+u32 vkb_frame_no();
 
 // First-fit allocator over a guest address range.
 class RangeAllocator {
@@ -109,6 +112,22 @@ static RangeAllocator g_virt, g_contig, g_system, g_pool;
 static u64 g_virt_committed;
 static bool g_trace_vmem = getenv("NL_TRACE_VMEM") != nullptr;
 
+// Committed pages of the virtual range. The game asks MmQueryStatistics how
+// much memory is free and flushes its caches when it runs low, so committing
+// a page twice or freeing it has to keep the count right.
+static std::vector<bool> g_virt_pages((VIRT_HI - VIRT_LO) / PAGE);
+
+static void track_commit(u32 lo, u32 hi, bool commit) {
+    for (u32 p = (lo - VIRT_LO) / PAGE; p < (hi - VIRT_LO) / PAGE; p++) {
+        if (g_virt_pages[p] == commit) continue;
+        g_virt_pages[p] = commit;
+        if (commit)
+            g_virt_committed += PAGE;
+        else
+            g_virt_committed -= PAGE;
+    }
+}
+
 static void host_commit(u32 a, u32 size) {
     if (!VirtualAlloc(gptr(a), size, MEM_COMMIT, PAGE_READWRITE)) fatal("commit %08X+%X failed", a, size);
 }
@@ -164,7 +183,8 @@ static u32 NtAllocateVirtualMemory(Ctx*, KArgs a) {
         MEMORY_BASIC_INFORMATION mbi;
         VirtualQuery(gptr(lo), &mbi, sizeof(mbi));
         host_commit(lo, hi - lo);
-        g_virt_committed += hi - lo;
+        crash_watch_page(lo, hi - lo);
+        track_commit(lo, hi, true);
         base = lo;
         size = hi - lo;
     }
@@ -182,6 +202,7 @@ static u32 NtFreeVirtualMemory(Ctx*, KArgs a) {
     if (!r.first) return STATUS_INVALID_PARAMETER;
     if (type & MEM_RELEASE_) {
         VirtualFree(gptr(r.first), r.second, MEM_DECOMMIT);
+        track_commit(r.first, r.first + r.second, false);
         g_virt.release(r.first);
         base = r.first;
         size = r.second;
@@ -189,6 +210,7 @@ static u32 NtFreeVirtualMemory(Ctx*, KArgs a) {
         u32 lo = base & ~(PAGE - 1);
         u32 hi = size ? align_up(base + size, PAGE) : r.first + r.second;
         VirtualFree(gptr(lo), hi - lo, MEM_DECOMMIT);
+        track_commit(lo, hi, false);
         base = lo;
         size = hi - lo;
     }
@@ -228,11 +250,14 @@ static u32 NtQueryVirtualMemory(Ctx*, KArgs a) {
 }
 
 // -------------------------------------------------------- contiguous/system
+
 static u32 contig_alloc(u32 size, u32 align) {
     std::lock_guard<std::mutex> lk(g_mem_m);
     if (align < PAGE) align = PAGE;
     u32 a = g_contig.alloc(align_up(size, PAGE), align);
     if (a) memset(gptr(a), 0, size);
+    if (a) crash_watch_page(a, size);
+    if (g_trace_vmem) log_msg("[vmem] contig alloc %08X+%X (frame %u)", a, size, vkb_frame_no());
     return a;
 }
 
@@ -247,6 +272,7 @@ static u32 MmAllocateContiguousMemoryEx(Ctx*, KArgs a) { return contig_alloc(a[0
 
 static u32 MmFreeContiguousMemory(Ctx*, KArgs a) {
     std::lock_guard<std::mutex> lk(g_mem_m);
+    if (g_trace_vmem) log_msg("[vmem] contig free %08X (frame %u)", a[0], vkb_frame_no());
     g_contig.release(a[0]);
     return 0;
 }
@@ -289,6 +315,7 @@ static u32 MmQueryStatistics(Ctx*, KArgs a) {
     u64 used = g_virt_committed + g_contig.used_bytes() + g_system.used_bytes() + (8u << 20);
     u32 total = RAM_SIZE / PAGE;
     u32 avail = used >= RAM_SIZE ? 256 : (u32)((RAM_SIZE - used) / PAGE);
+    if (g_trace_vmem) log_msg("[vmem] statistics: %u KB available, %llu KB virtual committed", avail * 4, g_virt_committed >> 10);
     wr32(s + 4, total);
     wr32(s + 8, avail);
     wr32(s + 12, (u32)g_virt_committed);

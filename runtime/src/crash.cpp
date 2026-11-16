@@ -48,6 +48,27 @@ static void print_host_stack(CONTEXT* ctx, HANDLE thread = GetCurrentThread()) {
     }
 }
 
+// Hash of the innermost host return addresses, to tell call paths apart.
+static u64 stack_key(CONTEXT* ctx) {
+    CONTEXT c = *ctx;
+    STACKFRAME64 f{};
+    f.AddrPC.Offset = c.Rip;
+    f.AddrPC.Mode = AddrModeFlat;
+    f.AddrStack.Offset = c.Rsp;
+    f.AddrStack.Mode = AddrModeFlat;
+    f.AddrFrame.Offset = c.Rbp;
+    f.AddrFrame.Mode = AddrModeFlat;
+    u64 h = 1469598103934665603ull;
+    for (int i = 0; i < 8; i++) {
+        if (!StackWalk64(IMAGE_FILE_MACHINE_AMD64, GetCurrentProcess(), GetCurrentThread(), &f, &c, nullptr,
+                         SymFunctionTableAccess64, SymGetModuleBase64, nullptr) ||
+            !f.AddrPC.Offset)
+            break;
+        h = (h ^ f.AddrPC.Offset) * 1099511628211ull;
+    }
+    return h;
+}
+
 // The game reads past the end of allocations (a texture whose data is smaller
 // than its header claims). On the console the next pages are usually mapped;
 // here a block can end at the edge of the address space in use. Give reads in
@@ -62,13 +83,131 @@ static bool map_overread(EXCEPTION_RECORD* r) {
     return true;
 }
 
+static bool g_overread_stack = getenv("NL_OVERREAD_STACK") != nullptr;
+u32 vkb_frame_no();
+
+
+// Raw guest stack words, to find a function's arguments while debugging.
+static void dump_guest_stack() {
+    GuestThread* t = cur_thread();
+    if (!t) return;
+    u32 sp = t->ctx.esp;
+    for (u32 i = 0; i < 0x800; i += 32)
+        log_msg("  stack %08X: %08X %08X %08X %08X %08X %08X %08X %08X", sp + i, rd32(sp + i), rd32(sp + i + 4),
+                rd32(sp + i + 8), rd32(sp + i + 12), rd32(sp + i + 16), rd32(sp + i + 20), rd32(sp + i + 24), rd32(sp + i + 28));
+}
+
+// NL_WATCH_WRITE=addr (hex): once that guest page is allocated, every write
+// to it logs the writer's call stack the first time that stack is seen
+// (debugging; the page is re-protected after each write by single-stepping).
+static u32 g_watch_page;
+static bool g_watch_rearm;
+
+static void watch_protect(DWORD prot) {
+    DWORD old;
+    VirtualProtect(gptr(g_watch_page), PAGE_MASK + 1, prot, &old);
+    // Physical RAM has a second view: 0x80000000 and the write-combined 0xF0000000.
+    if (g_watch_page >= 0x80000000u && g_watch_page < 0x84000000u)
+        VirtualProtect(gptr(g_watch_page + 0x70000000u), PAGE_MASK + 1, prot, &old);
+}
+
+void crash_watch_page(u32 a, u32 size) {
+    static u32 watch = getenv("NL_WATCH_WRITE") ? (u32)strtoul(getenv("NL_WATCH_WRITE"), nullptr, 16) : 0;
+    if (!watch || watch < a || watch >= a + size) return;
+    g_watch_page = watch & ~PAGE_MASK;
+    watch_protect(PAGE_READONLY);
+    log_msg("[watch] page %08X protected (allocation %08X+%X)", g_watch_page, a, size);
+}
+
+static bool watch_hit(EXCEPTION_POINTERS* ep) {
+    EXCEPTION_RECORD* r = ep->ExceptionRecord;
+    if (r->ExceptionCode == EXCEPTION_SINGLE_STEP && g_watch_rearm) {
+        g_watch_rearm = false;
+        watch_protect(PAGE_READONLY);
+        return true;
+    }
+    u64 addr = r->ExceptionInformation[1], base = (u64)GUEST_BASE;
+    if (r->ExceptionCode != EXCEPTION_ACCESS_VIOLATION || !g_watch_page || r->ExceptionInformation[0] != 1) return false;
+    u32 g = (u32)(addr - base);
+    if ((g & ~PAGE_MASK) != g_watch_page && (g & ~PAGE_MASK) != g_watch_page + 0x70000000u) return false;
+    watch_protect(PAGE_READWRITE);
+    g_watch_rearm = true;
+    ep->ContextRecord->EFlags |= 0x100;  // trap after this instruction to re-protect
+    // Log each distinct host call stack once.
+    static std::vector<u64> seen;
+    static u32 watch_lo = getenv("NL_WATCH_WRITE") ? (u32)strtoul(getenv("NL_WATCH_WRITE"), nullptr, 16) : 0;
+    if ((g & 0x0FFFFFFF) < (watch_lo & 0x0FFFFFFF)) return true;  // only at or above the watched address
+    u64 key = stack_key(ep->ContextRecord);
+    for (u64 k : seen)
+        if (k == key) return true;
+    if (seen.size() >= 40) return true;
+    seen.push_back(key);
+    // NL_WATCH_DUMP=addr:len (hex): save that guest memory at the first hit.
+    static const char* dump = getenv("NL_WATCH_DUMP");
+    if (dump) {
+        u32 da = 0, dl = 0;
+        sscanf(dump, "%x:%x", &da, &dl);
+        dump = nullptr;
+        if (FILE* f = fopen("watch_dump.bin", "wb")) {
+            fwrite(gptr(da), 1, dl, f);
+            fclose(f);
+        }
+    }
+    // NL_WATCH_FIND=file: at the first hit, list where the middle 1 KB of that
+    // file's bytes sits in committed guest memory.
+    static const char* find = getenv("NL_WATCH_FIND");
+    if (find) {
+        std::vector<u8> pat;
+        if (FILE* f = fopen(find, "rb")) {
+            fseek(f, 0, SEEK_END);
+            long n = ftell(f);
+            pat.resize(n);
+            fseek(f, 0, SEEK_SET);
+            fread(pat.data(), 1, n, f);
+            fclose(f);
+        }
+        find = nullptr;
+        if (pat.size() >= 0x800) {
+            const u8* needle = pat.data() + pat.size() / 2;
+            u64 a = (u64)GUEST_BASE + 0x10000000u, end = (u64)GUEST_BASE + 0x90000000u;
+            while (a < end) {
+                MEMORY_BASIC_INFORMATION mbi;
+                if (!VirtualQuery((void*)a, &mbi, sizeof mbi)) break;
+                u64 next = (u64)mbi.BaseAddress + mbi.RegionSize;
+                if (mbi.State == MEM_COMMIT && (mbi.Protect & (PAGE_READWRITE | PAGE_READONLY))) {
+                    const u8* p = (const u8*)mbi.BaseAddress;
+                    for (u64 i = 0; i + 0x400 <= mbi.RegionSize; i += 2)
+                        if (p[i] == needle[0] && !memcmp(p + i, needle, 0x400))
+                            log_msg("[watch] pattern (middle of %s) at %08llX", getenv("NL_WATCH_FIND"),
+                                    (u64)(p + i) - (u64)GUEST_BASE - pat.size() / 2);
+                }
+                a = next;
+            }
+        }
+    }
+    fprintf(stderr, "[watch] write to %08X (frame %u)\n", g, vkb_frame_no());
+    print_host_stack(ep->ContextRecord);
+    dump_guest_stack();
+    fflush(stderr);
+    return true;
+}
+
 static LONG WINAPI on_exception(EXCEPTION_POINTERS* ep) {
     DWORD code = ep->ExceptionRecord->ExceptionCode;
+    if ((code == EXCEPTION_ACCESS_VIOLATION || code == EXCEPTION_SINGLE_STEP) && watch_hit(ep))
+        return EXCEPTION_CONTINUE_EXECUTION;
     // Only fatal hardware exceptions; C++/debugger exceptions pass through.
     if (code != EXCEPTION_ACCESS_VIOLATION && code != EXCEPTION_INT_DIVIDE_BY_ZERO &&
         code != EXCEPTION_INT_OVERFLOW && code != EXCEPTION_STACK_OVERFLOW && code != EXCEPTION_ILLEGAL_INSTRUCTION)
         return EXCEPTION_CONTINUE_SEARCH;
-    if (code == EXCEPTION_ACCESS_VIOLATION && map_overread(ep->ExceptionRecord)) return EXCEPTION_CONTINUE_EXECUTION;
+    if (code == EXCEPTION_ACCESS_VIOLATION && map_overread(ep->ExceptionRecord)) {
+        if (g_overread_stack) {
+            g_overread_stack = false;
+            print_host_stack(ep->ContextRecord, GetCurrentThread());
+            dump_guest_stack();
+        }
+        return EXCEPTION_CONTINUE_EXECUTION;
+    }
     static LONG once;
     if (InterlockedExchange(&once, 1)) return EXCEPTION_CONTINUE_SEARCH;
 

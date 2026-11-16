@@ -150,6 +150,12 @@ static bool poll(int port, XINPUT_STATE* out) {
     Pad& p = g_pads[port];
     s64 now = now_ms();
     XINPUT_STATE st;
+    // Scripted test input must not depend on whether a real controller is plugged in.
+    static bool scripted = getenv("NL_MONKEY") || getenv("NL_AUTOPRESS");
+    if (port == 0 && scripted) {
+        if (out) virtual_state(out);
+        return true;
+    }
     if (!p.connected && now < p.next_probe_ms) {
         if (port == 0 && g_virtual) {
             if (out) virtual_state(out);

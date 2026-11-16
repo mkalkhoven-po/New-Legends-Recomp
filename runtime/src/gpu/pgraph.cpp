@@ -540,6 +540,9 @@ static void flush_draw() {
     d.fs = gen_fragment_shader(g_k, d.tex, d.tex_mask);
     static int trace_frame = getenv("NL_TRACE_DRAWS") ? atoi(getenv("NL_TRACE_DRAWS")) : -1;
     if ((int)vkb_frame_no() == trace_frame)
+        log_msg("[draw] tex0 %08X %ux%u pitch %u lin %u lv %u", d.tex[0].addr, d.tex[0].width, d.tex[0].height, d.tex[0].pitch,
+                d.tex[0].linear, d.tex[0].levels);
+    if ((int)vkb_frame_no() == trace_frame)
         log_msg("[draw] vs %04u fs %04u cull %u/%X/%X z %u/%u blend %u/%X/%X cmask %X prim %u n %zu mode %s light %u mask %X skin %u texgen %08X attrs %04X tex %X fmt %02X/%02X shader %08X comb %u",
                 vkb_shader_id(d.vs, false), vkb_shader_id(d.fs, true), g_k.r(NV097_SET_CULL_FACE_ENABLE),
                 g_k.r(NV097_SET_CULL_FACE), g_k.r(NV097_SET_FRONT_FACE), g_k.r(NV097_SET_DEPTH_TEST_ENABLE),
@@ -571,6 +574,13 @@ static void flush_draw() {
     if (only_vs && d.vs.find(only_vs) == std::string::npos) return;
     static const char* only_fs = getenv("NL_ONLY_FS");
     if (only_fs && d.fs.find(only_fs) == std::string::npos) return;
+    // NL_SKIP_TEX=lo-hi (hex): leave out draws whose first texture is in [lo, hi].
+    static u32 skip_lo, skip_hi;
+    static bool skip = [] {
+        const char* s = getenv("NL_SKIP_TEX");
+        return s && sscanf(s, "%x-%x", &skip_lo, &skip_hi) == 2;
+    }();
+    if (skip && d.tex[0].addr >= skip_lo && d.tex[0].addr <= skip_hi) return;
     bind_targets();
     vkb_draw(d);
 }

@@ -6,9 +6,11 @@
 // whose output goes to the host (audio_out.cpp). Sample data stays in guest
 // memory and is read live, so Bink can keep filling its ring buffer.
 #include <math.h>
+#include <stdarg.h>
 
 #include <deque>
 #include <mutex>
+#include <string>
 #include <unordered_map>
 #include <vector>
 
@@ -368,6 +370,20 @@ void dsound_mix(float* out, u32 frames) {
 }
 
 // ---------------------------------------------------------------- settings
+static bool g_trace = getenv("NL_TRACE_DSOUND") != nullptr;
+
+// NL_TRACE_DSOUND: log each distinct effect setting once (what the game uses).
+static void trace_distinct(const char* fmt, ...) {
+    if (!g_trace) return;
+    static std::unordered_map<std::string, int> seen;
+    char buf[512];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(buf, sizeof buf, fmt, ap);
+    va_end(ap);
+    if (seen.size() < 500 && !seen[buf]++) log_msg("[dsound] %s", buf);
+}
+
 static u32 release(Voice* v) {
     if (!v) return 0;
     if (--v->refs) return v->refs;
@@ -389,6 +405,7 @@ static void set_mixbins(Voice* v, u32 bins) {
     for (u32 i = 0; i < n; i++) {
         u32 bin = rd32(pairs + 8 * i);
         float g = powf(10.0f, (float)(s32)rd32(pairs + 8 * i + 4) / 2000.0f);
+        if (bin > MIXBIN_BACK_RIGHT) trace_distinct("mixbin %u volume %d", bin, (s32)rd32(pairs + 8 * i + 4));
         switch (bin) {
         case MIXBIN_FRONT_LEFT: case MIXBIN_BACK_LEFT: l += g; break;
         case MIXBIN_FRONT_RIGHT: case MIXBIN_BACK_RIGHT: r += g; break;
@@ -412,9 +429,11 @@ static void set_3d_params(Voice* v, u32 p) {
     v->min_dist = rdf32(p + 0x34);
     v->max_dist = rdf32(p + 0x38);
     v->mode3d = rd32(p + 0x3C);
+    // Cones are not modelled; the game sets none (seen with NL_TRACE_DSOUND).
+    trace_distinct("3D cone inside %u outside %u orientation %g %g %g outside volume %d", rd32(p + 0x1C), rd32(p + 0x20),
+                   rdf32(p + 0x24), rdf32(p + 0x28), rdf32(p + 0x2C), (s32)rd32(p + 0x30));
 }
 
-static bool g_trace = getenv("NL_TRACE_DSOUND") != nullptr;
 
 static u32 create_buffer(u32 desc, u32 out) {
     std::lock_guard<std::mutex> lk(g_m);
@@ -485,7 +504,19 @@ void hle_IDirectSound_DownloadEffectsImage(Ctx* c) {
     ret(c, S_OK_, 5);
 }
 void hle_IDirectSound_CommitDeferredSettings(Ctx* c) { ret(c, S_OK_, 1); }  // settings apply at once
-void hle_IDirectSound_SetI3DL2Listener(Ctx* c) { ret(c, S_OK_, 3); }        // no reverb
+// (this, DSI3DL2LISTENER*, apply): room, room HF, rolloff, decay time, decay
+// HF ratio, reflections, reflections delay, reverb, reverb delay, diffusion,
+// density, HF reference.
+void hle_IDirectSound_SetI3DL2Listener(Ctx* c) {
+    u32 p = arg(c, 1);
+    if (p)
+        trace_distinct("I3DL2 listener room %d hf %d rolloff %g decay %g hf ratio %g refl %d delay %g reverb %d delay %g "
+                       "diffusion %g density %g hf ref %g",
+                       (s32)rd32(p), (s32)rd32(p + 4), rdf32(p + 8), rdf32(p + 12), rdf32(p + 16), (s32)rd32(p + 20),
+                       rdf32(p + 24), (s32)rd32(p + 28), rdf32(p + 32), rdf32(p + 36), rdf32(p + 40), rdf32(p + 44));
+    // Not modelled: every level sets reflections and reverb to -10000 (off).
+    ret(c, S_OK_, 3);
+}
 
 void hle_IDirectSound_SetDistanceFactor(Ctx* c) {
     std::lock_guard<std::mutex> lk(g_m);
@@ -544,8 +575,15 @@ void hle_ds_SetMixBins(Ctx* c) {
     set_mixbins(v, arg(c, 1));
     ret(c, S_OK_, 2);
 }
-// (this, DSFILTERDESC*): the per-voice hardware filter is not modelled.
-void hle_ds_SetFilter(Ctx* c) { ret(c, S_OK_, 2); }
+// (this, DSFILTERDESC*): the per-voice hardware filter is not modelled. The
+// game sets one rarely (a parametric EQ on a single ADPCM buffer, 01aFlare).
+void hle_ds_SetFilter(Ctx* c) {
+    u32 p = arg(c, 1);
+    if (p)
+        trace_distinct("filter mode %X q %u coefficients %08X %08X %08X %08X", rd32(p), rd32(p + 4), rd32(p + 8),
+                       rd32(p + 12), rd32(p + 16), rd32(p + 20));
+    ret(c, S_OK_, 2);
+}
 // (this, mix-in buffer): submixes play straight to the output.
 void hle_ds_SetOutputBuffer(Ctx* c) { ret(c, S_OK_, 2); }
 void hle_ds_SetAllParameters(Ctx* c) {

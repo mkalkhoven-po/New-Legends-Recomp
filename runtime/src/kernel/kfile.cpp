@@ -299,7 +299,10 @@ static void complete_io(u32 event_handle, u32 apc) {
 
 static u32 NtReadFile(Ctx*, KArgs a) {
     HostFile* f = get_file(a[0]);
-    if (!f) return STATUS_INVALID_HANDLE;
+    if (!f) {
+        if (g_trace) log_msg("read handle %X: invalid handle", a[0]);
+        return STATUS_INVALID_HANDLE;
+    }
     u32 iosb = a[4], buf = a[5], len = a[6];
     seek_for_io(f, a[7]);
     DWORD got = 0;
@@ -320,6 +323,13 @@ static u32 NtReadFile(Ctx*, KArgs a) {
         got += extra;
     }
     u32 status = !ok ? STATUS_UNSUCCESSFUL : (got == 0 && len > 0) ? STATUS_END_OF_FILE : STATUS_SUCCESS;
+    // NL_WATCH_READ=addr (hex): log reads whose buffer covers addr.
+    static u32 watch = getenv("NL_WATCH_READ") ? (u32)strtoul(getenv("NL_WATCH_READ"), nullptr, 16) : 0;
+    if (g_trace || (watch && watch >= buf && watch < buf + len)) {
+        LARGE_INTEGER zero{}, pos{};
+        SetFilePointerEx(f->h, zero, &pos, FILE_CURRENT);
+        log_msg("read handle %X -> %08X+%X, file offset %llX, got %X", a[0], buf, len, (u64)pos.QuadPart - got, got);
+    }
     io_status(iosb, status, got);
     complete_io(a[1], a[2]);
     return status;
