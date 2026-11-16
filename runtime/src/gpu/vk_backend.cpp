@@ -12,6 +12,8 @@
 #include <thread>
 #include <unordered_map>
 
+#include "settings.h"
+#include "version.h"
 #include "texture.h"
 
 #define VKCHECK(x)                                                    \
@@ -25,26 +27,83 @@ static HWND g_hwnd;
 static std::mutex g_win_m;
 static std::condition_variable g_win_cv;
 static bool g_resized;
+static bool g_fullscreen;
+static RECT g_windowed_rect;  // outer window rect to return to from fullscreen
+
+constexpr DWORD WINDOWED_STYLE = WS_OVERLAPPEDWINDOW | WS_VISIBLE;
+constexpr DWORD FULLSCREEN_STYLE = WS_POPUP | WS_VISIBLE;
+
+// Borderless fullscreen on the monitor the window is on.
+static void set_fullscreen(HWND h, bool on) {
+    if (on == g_fullscreen) return;
+    if (on) {
+        GetWindowRect(h, &g_windowed_rect);
+        MONITORINFO mi{sizeof mi};
+        GetMonitorInfoW(MonitorFromWindow(h, MONITOR_DEFAULTTONEAREST), &mi);
+        SetWindowLongW(h, GWL_STYLE, FULLSCREEN_STYLE);
+        SetWindowPos(h, HWND_TOP, mi.rcMonitor.left, mi.rcMonitor.top, mi.rcMonitor.right - mi.rcMonitor.left,
+                     mi.rcMonitor.bottom - mi.rcMonitor.top, SWP_FRAMECHANGED | SWP_SHOWWINDOW);
+    } else {
+        SetWindowLongW(h, GWL_STYLE, WINDOWED_STYLE);
+        const RECT& r = g_windowed_rect;
+        SetWindowPos(h, HWND_NOTOPMOST, r.left, r.top, r.right - r.left, r.bottom - r.top,
+                     SWP_FRAMECHANGED | SWP_SHOWWINDOW);
+    }
+    g_fullscreen = on;
+    settings_set_fullscreen(on);
+    g_resized = true;
+}
 
 static LRESULT CALLBACK wnd_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     switch (msg) {
     case WM_SIZE: g_resized = true; return 0;
     case WM_CLOSE: ExitProcess(0);
+    case WM_SYSKEYDOWN:
+        if (wp == VK_RETURN && (lp & (1 << 29)) && !(lp & (1 << 30))) {  // Alt+Enter, not a repeat
+            set_fullscreen(h, !g_fullscreen);
+            return 0;
+        }
+        if (wp == VK_F10) return 0;  // F10 would open the (absent) window menu
+        break;
+    case WM_SYSCHAR:
+        if (wp == VK_RETURN) return 0;  // no beep for Alt+Enter
+        break;
+    case WM_KEYDOWN:
+        if (wp == VK_F11 && !(lp & (1 << 30))) {
+            set_fullscreen(h, !g_fullscreen);
+            return 0;
+        }
+        break;
+    case WM_SETCURSOR:
+        if (g_fullscreen && LOWORD(lp) == HTCLIENT) {
+            SetCursor(nullptr);
+            return TRUE;
+        }
+        break;
     }
     return DefWindowProcW(h, msg, wp, lp);
 }
 
 static void window_thread() {
+    const Settings& cfg = settings();
     WNDCLASSW wc{};
     wc.lpfnWndProc = wnd_proc;
     wc.hInstance = GetModuleHandleW(nullptr);
     wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
+    wc.hIcon = LoadIconW(wc.hInstance, MAKEINTRESOURCEW(1));
     wc.lpszClassName = L"NewLegends";
     RegisterClassW(&wc);
-    RECT r{0, 0, 1280, 960};
+    RECT r{0, 0, cfg.window_width, cfg.window_height};
     AdjustWindowRect(&r, WS_OVERLAPPEDWINDOW, FALSE);
-    HWND h = CreateWindowW(L"NewLegends", L"New Legends", WS_OVERLAPPEDWINDOW | WS_VISIBLE, CW_USEDEFAULT, CW_USEDEFAULT,
-                           r.right - r.left, r.bottom - r.top, nullptr, nullptr, wc.hInstance, nullptr);
+    int x = CW_USEDEFAULT, y = CW_USEDEFAULT;
+    if (cfg.window_x != -1 || cfg.window_y != -1) {
+        // Keep a remembered position only while it is still on a monitor.
+        RECT want{cfg.window_x, cfg.window_y, cfg.window_x + r.right - r.left, cfg.window_y + r.bottom - r.top};
+        if (MonitorFromRect(&want, MONITOR_DEFAULTTONULL)) x = cfg.window_x, y = cfg.window_y;
+    }
+    HWND h = CreateWindowW(L"NewLegends", L"" NL_PRODUCT_NAME " " NL_VERSION_STRING, WINDOWED_STYLE, x, y, r.right - r.left, r.bottom - r.top,
+                           nullptr, nullptr, wc.hInstance, nullptr);
+    if (cfg.fullscreen) set_fullscreen(h, true);
     {
         std::lock_guard<std::mutex> lk(g_win_m);
         g_hwnd = h;
@@ -59,7 +118,15 @@ static void window_thread() {
 
 bool host_window_focused() { return g_hwnd && GetForegroundWindow() == g_hwnd; }
 void host_window_hide() {
-    if (g_hwnd) ShowWindow(g_hwnd, SW_HIDE);
+    if (!g_hwnd) return;
+    // A level change starts a new process: hand it the window position and size.
+    RECT r = g_windowed_rect;
+    if (!g_fullscreen) GetWindowRect(g_hwnd, &r);
+    RECT client{0, 0, 0, 0};
+    AdjustWindowRect(&client, WS_OVERLAPPEDWINDOW, FALSE);  // border sizes (negative left/top)
+    settings_set_window(r.left, r.top, (r.right - r.left) - (client.right - client.left),
+                        (r.bottom - r.top) - (client.bottom - client.top));
+    ShowWindow(g_hwnd, SW_HIDE);
 }
 
 // --------------------------------------------------------------- device
@@ -422,14 +489,131 @@ BlitResult vkb_blit(u32 src, u32 dst, u32 sx, u32 sy, u32 dx, u32 dy, u32 w, u32
     return BlitResult::Done;
 }
 
+// ------------------------------------------------------------ disk cache
+// Shaders are generated while the game runs, so a first visit to a place
+// would stall on GLSL compilation and pipeline creation. Both results are
+// kept on disk for the next run:
+//   cache/spirv.bin      header, then {u64 key, u32 words, SPIR-V words} records, appended as compiled
+//   cache/pipelines.bin  the driver's VkPipelineCache blob (it ignores a blob from another GPU or driver)
+static const char* SPIRV_CACHE = "cache/spirv.bin";
+static const char* PIPELINE_CACHE = "cache/pipelines.bin";
+// Bump when the GLSL compile options change: old SPIR-V is then ignored.
+static const char SPIRV_MAGIC[8] = {'N', 'L', 'S', 'P', 'V', '0', '0', '1'};
+
+static std::unordered_map<u64, std::vector<u32>> g_spirv_disk;
+static FILE* g_spirv_out;
+static VkPipelineCache g_pcache;
+static u32 g_pipes_unsaved;
+
+struct CacheStats {
+    u32 compiled = 0, from_disk = 0, pipelines = 0;
+    double compile_ms = 0, pipeline_ms = 0;
+};
+static CacheStats g_cstats, g_cstats_logged;
+
+static double ms_since(const LARGE_INTEGER& t0) {
+    LARGE_INTEGER t, f;
+    QueryPerformanceCounter(&t);
+    QueryPerformanceFrequency(&f);
+    return (double)(t.QuadPart - t0.QuadPart) * 1000.0 / (double)f.QuadPart;
+}
+
+static u64 shader_key(const std::string& src, bool fragment) {
+    u64 h = 1469598103934665603ull ^ (fragment ? 0x9E3779B97F4A7C15ull : 0);
+    for (unsigned char ch : src) h = (h ^ ch) * 1099511628211ull;
+    return h ^ src.size();
+}
+
+static void cache_load() {
+    CreateDirectoryA("cache", nullptr);
+    if (FILE* f = fopen(SPIRV_CACHE, "rb")) {
+        char magic[8];
+        bool ok = fread(magic, 1, 8, f) == 8 && !memcmp(magic, SPIRV_MAGIC, 8);
+        while (ok) {
+            u64 key;
+            u32 words;
+            if (fread(&key, 8, 1, f) != 1 || fread(&words, 4, 1, f) != 1 || words == 0 || words > (16u << 20)) break;
+            std::vector<u32> code(words);
+            if (fread(code.data(), 4, words, f) != words) break;  // a record cut short by a crash
+            g_spirv_disk[key] = std::move(code);
+        }
+        fclose(f);
+        if (!ok) remove(SPIRV_CACHE);
+    }
+    // Rewrite the file from what was read: drops a torn last record.
+    if ((g_spirv_out = fopen(SPIRV_CACHE, "wb"))) {
+        fwrite(SPIRV_MAGIC, 1, 8, g_spirv_out);
+        for (auto& [key, code] : g_spirv_disk) {
+            u32 words = (u32)code.size();
+            fwrite(&key, 8, 1, g_spirv_out);
+            fwrite(&words, 4, 1, g_spirv_out);
+            fwrite(code.data(), 4, words, g_spirv_out);
+        }
+        fflush(g_spirv_out);
+    }
+    std::vector<u8> blob;
+    if (FILE* f = fopen(PIPELINE_CACHE, "rb")) {
+        fseek(f, 0, SEEK_END);
+        blob.resize((size_t)ftell(f));
+        fseek(f, 0, SEEK_SET);
+        if (fread(blob.data(), 1, blob.size(), f) != blob.size()) blob.clear();
+        fclose(f);
+    }
+    VkPipelineCacheCreateInfo ci{VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO};
+    ci.initialDataSize = blob.size();
+    ci.pInitialData = blob.empty() ? nullptr : blob.data();
+    if (vkCreatePipelineCache(g_dev, &ci, nullptr, &g_pcache) != VK_SUCCESS) {
+        ci.initialDataSize = 0;
+        ci.pInitialData = nullptr;
+        VKCHECK(vkCreatePipelineCache(g_dev, &ci, nullptr, &g_pcache));
+    }
+    log_msg("shader cache: %zu SPIR-V shaders, %zu KB of pipeline data", g_spirv_disk.size(), blob.size() / 1024);
+}
+
+// Called from the GPU thread, which also creates the pipelines.
+static void cache_save_pipelines() {
+    if (!g_pipes_unsaved) return;
+    g_pipes_unsaved = 0;
+    size_t size = 0;
+    if (vkGetPipelineCacheData(g_dev, g_pcache, &size, nullptr) != VK_SUCCESS || !size) return;
+    std::vector<u8> blob(size);
+    if (vkGetPipelineCacheData(g_dev, g_pcache, &size, blob.data()) != VK_SUCCESS) return;
+    std::string tmp = std::string(PIPELINE_CACHE) + ".tmp";
+    FILE* f = fopen(tmp.c_str(), "wb");
+    if (!f) return;
+    bool ok = fwrite(blob.data(), 1, size, f) == size;
+    ok = fclose(f) == 0 && ok;
+    if (ok) MoveFileExA(tmp.c_str(), PIPELINE_CACHE, MOVEFILE_REPLACE_EXISTING);
+}
+
 // --------------------------------------------------------------- shaders
 static shaderc_compiler_t g_shaderc;
 static std::unordered_map<std::string, VkShaderModule> g_modules;
 static std::unordered_map<VkShaderModule, u32> g_module_ids;
 
+static VkShaderModule make_module(const u32* code, size_t bytes) {
+    VkShaderModuleCreateInfo ci{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
+    ci.codeSize = bytes;
+    ci.pCode = code;
+    VkShaderModule m;
+    VKCHECK(vkCreateShaderModule(g_dev, &ci, nullptr, &m));
+    return m;
+}
+
 static VkShaderModule shader_module(const std::string& src, bool fragment) {
     auto it = g_modules.find(src);
     if (it != g_modules.end()) return it->second;
+    u64 key = shader_key(src, fragment);
+    auto disk = g_spirv_disk.find(key);
+    if (disk != g_spirv_disk.end() && !getenv("NL_DUMP_SHADERS")) {
+        VkShaderModule m = make_module(disk->second.data(), disk->second.size() * 4);
+        g_cstats.from_disk++;
+        g_module_ids[m] = (u32)g_modules.size();
+        g_modules.emplace(src, m);
+        return m;
+    }
+    LARGE_INTEGER t0;
+    QueryPerformanceCounter(&t0);
     // NL_DUMP_SHADERS: write every new shader to shaders/NNNN.vert|frag.
     static bool dump = getenv("NL_DUMP_SHADERS") != nullptr;
     if (dump) {
@@ -452,12 +636,20 @@ static VkShaderModule shader_module(const std::string& src, bool fragment) {
         log_msg("shader compile failed:\n%s\n----\n%s", shaderc_result_get_error_message(res), src.c_str());
         fatal("GLSL compilation failed");
     }
-    VkShaderModuleCreateInfo ci{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
-    ci.codeSize = shaderc_result_get_length(res);
-    ci.pCode = (const u32*)shaderc_result_get_bytes(res);
-    VkShaderModule m;
-    VKCHECK(vkCreateShaderModule(g_dev, &ci, nullptr, &m));
+    const u32* code = (const u32*)shaderc_result_get_bytes(res);
+    size_t bytes = shaderc_result_get_length(res);
+    VkShaderModule m = make_module(code, bytes);
+    if (g_spirv_out) {
+        u32 words = (u32)(bytes / 4);
+        fwrite(&key, 8, 1, g_spirv_out);
+        fwrite(&words, 4, 1, g_spirv_out);
+        fwrite(code, 4, words, g_spirv_out);
+        fflush(g_spirv_out);
+    }
+    g_spirv_disk[key].assign(code, code + bytes / 4);
     shaderc_result_release(res);
+    g_cstats.compiled++;
+    g_cstats.compile_ms += ms_since(t0);
     g_module_ids[m] = (u32)g_modules.size();
     g_modules.emplace(src, m);
     return m;
@@ -568,7 +760,12 @@ static VkPipeline pipeline(const PipeKey& k) {
     ci.pDynamicState = &dy;
     ci.layout = g_playout;
     VkPipeline p;
-    VKCHECK(vkCreateGraphicsPipelines(g_dev, VK_NULL_HANDLE, 1, &ci, nullptr, &p));
+    LARGE_INTEGER t0;
+    QueryPerformanceCounter(&t0);
+    VKCHECK(vkCreateGraphicsPipelines(g_dev, g_pcache, 1, &ci, nullptr, &p));
+    g_cstats.pipelines++;
+    g_cstats.pipeline_ms += ms_since(t0);
+    g_pipes_unsaved++;
     g_pipes.emplace(k, p);
     return p;
 }
@@ -833,7 +1030,7 @@ void vkb_present(u32 color_addr) {
         if (it != g_color_surfaces.end()) {
             Image& src = it->second;
             transition(src, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
-            // Fit the 4:3 frame into the window, keeping the aspect ratio.
+            // Fit the 4:3 frame into the window, keeping the aspect ratio unless stretched.
             u32 sw = g_rt.color_addr == color_addr && g_rt.width ? g_rt.width : src.w;
             u32 sh = g_rt.color_addr == color_addr && g_rt.height ? g_rt.height : src.h;
             if (sw > src.w) sw = src.w;
@@ -842,6 +1039,7 @@ void vkb_present(u32 color_addr) {
                               ? (float)g_sc_extent.width / sw
                               : (float)g_sc_extent.height / sh;
             int dw = (int)(sw * scale), dh = (int)(sh * scale);
+            if (settings().aspect == Aspect::Stretch) dw = (int)g_sc_extent.width, dh = (int)g_sc_extent.height;
             int dx = ((int)g_sc_extent.width - dw) / 2, dy = ((int)g_sc_extent.height - dh) / 2;
             VkImageBlit bl{};
             bl.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
@@ -850,7 +1048,7 @@ void vkb_present(u32 color_addr) {
             bl.dstOffsets[0] = {dx, dy, 0};
             bl.dstOffsets[1] = {dx + dw, dy + dh, 1};
             vkCmdBlitImage(cmd(), src.img, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, dst, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                           1, &bl, VK_FILTER_LINEAR);
+                           1, &bl, settings().smooth ? VK_FILTER_LINEAR : VK_FILTER_NEAREST);
             if (g_dump_every && g_frame_no % g_dump_every == 0) dump_w = sw, dump_h = sh, dump_src = &src;
         }
         b.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
@@ -889,6 +1087,15 @@ void vkb_present(u32 color_addr) {
     }
     g_fi = (g_fi + 1) % FRAMES;
     g_frame_no++;
+    if (g_frame_no % 300 == 0) {
+        cache_save_pipelines();
+        if (memcmp(&g_cstats, &g_cstats_logged, sizeof g_cstats)) {
+            log_msg("shader cache: %u compiled (%.0f ms), %u from disk; %u pipelines created (%.0f ms)",
+                    g_cstats.compiled, g_cstats.compile_ms, g_cstats.from_disk, g_cstats.pipelines,
+                    g_cstats.pipeline_ms);
+            g_cstats_logged = g_cstats;
+        }
+    }
     begin_frame();
     // Image layouts persist across command buffers; nothing to reset.
 }
@@ -1016,6 +1223,7 @@ void vkb_init() {
         VKCHECK(vkMapMemory(g_dev, f.ring_mem, 0, RING_SIZE, 0, (void**)&f.ring_ptr));
     }
     g_shaderc = shaderc_compiler_initialize();
+    cache_load();
 
     begin_frame();
     // Placeholder textures for unbound stages: opaque black.

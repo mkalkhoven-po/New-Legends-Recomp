@@ -3,6 +3,7 @@
 #include <windows.h>
 
 #include <mutex>
+#include <string>
 
 #include "runtime.h"
 
@@ -15,14 +16,31 @@ void log_msg(const char* fmt, ...) {
     fflush(stderr);
 }
 
+// A player started the program (its output goes to a console window, not to
+// a file of an automated test): errors also get a message box.
+static bool interactive() { return GetFileType(GetStdHandle(STD_ERROR_HANDLE)) == FILE_TYPE_CHAR; }
+
+// An error the player can fix (missing or wrong game files): explain and quit.
+[[noreturn]] void show_user_error(const char* text) {
+    log_msg("%s", text);
+    if (interactive()) MessageBoxA(nullptr, text, "New Legends Recomp", MB_OK | MB_ICONWARNING);
+    TerminateProcess(GetCurrentProcess(), 1);
+    abort();
+}
+
 void fatal(const char* fmt, ...) {
     va_list ap;
     va_start(ap, fmt);
-    fputs("FATAL: ", stderr);
-    vfprintf(stderr, fmt, ap);
+    char msg[1024];
+    vsnprintf(msg, sizeof msg, fmt, ap);
     va_end(ap);
-    fputc('\n', stderr);
+    fprintf(stderr, "FATAL: %s\n", msg);
     fflush(stderr);
+    if (interactive()) {
+        std::string text = std::string("The game stopped because of an internal error:\n\n") + msg +
+                           "\n\nThe console window shows what happened just before.";
+        MessageBoxA(nullptr, text.c_str(), "New Legends Recomp", MB_OK | MB_ICONERROR);
+    }
     // Not exit(): other threads are running guest code and would crash into
     // the static destructors.
     TerminateProcess(GetCurrentProcess(), 1);

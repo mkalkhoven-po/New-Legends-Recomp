@@ -11,6 +11,7 @@
 #include <vector>
 
 #include "kernel.h"
+#include "settings.h"
 
 constexpr u32 XDEVICE_TYPE_GAMEPAD = 0x00221CC0;  // the game's gamepad type table
 constexpr u32 ERROR_SUCCESS_ = 0, ERROR_DEVICE_NOT_CONNECTED_ = 1167;
@@ -32,10 +33,10 @@ struct Pad {
 static Pad g_pads[PORTS];
 static u32 g_reported_mask;
 
-// Port 0 falls back to a virtual pad (keyboard, plus scripted presses from
-// NL_AUTOPRESS="seconds:button,...") when no controller is plugged in.
+// Port 0 is always there: a real controller plus the keyboard (keys from
+// newlegends.ini), or the keyboard alone. Scripted presses from
+// NL_AUTOPRESS="seconds:button,..." and NL_MONKEY replace the real pad.
 bool host_window_focused();
-static bool g_virtual = getenv("NL_NO_KEYBOARD") == nullptr;
 
 struct ScriptPress {
     s64 at_ms;
@@ -104,6 +105,42 @@ static void monkey_state(XINPUT_GAMEPAD& g, s64 now) {
     if (now < press_until) g.wButtons |= button;
 }
 
+// Keys from newlegends.ini, added on top of whatever `g` already holds.
+static void keyboard_state(XINPUT_GAMEPAD& g) {
+    const Settings& cfg = settings();
+    if (!cfg.keyboard || !host_window_focused()) return;
+    // Alt+Enter switches fullscreen; it must not also press what Enter is bound to.
+    bool alt = (GetAsyncKeyState(VK_MENU) & 0x8000) != 0;
+    auto down = [&](PadControl c) {
+        for (int vk : cfg.keys[c])
+            if ((GetAsyncKeyState(vk) & 0x8000) && !(alt && vk == VK_RETURN)) return true;
+        return false;
+    };
+    static const struct {
+        PadControl control;
+        u16 button;
+    } buttons[] = {{PAD_DPAD_UP, XINPUT_GAMEPAD_DPAD_UP},     {PAD_DPAD_DOWN, XINPUT_GAMEPAD_DPAD_DOWN},
+                   {PAD_DPAD_LEFT, XINPUT_GAMEPAD_DPAD_LEFT}, {PAD_DPAD_RIGHT, XINPUT_GAMEPAD_DPAD_RIGHT},
+                   {PAD_START, XINPUT_GAMEPAD_START},         {PAD_BACK, XINPUT_GAMEPAD_BACK},
+                   {PAD_LEFT_THUMB, XINPUT_GAMEPAD_LEFT_THUMB}, {PAD_RIGHT_THUMB, XINPUT_GAMEPAD_RIGHT_THUMB},
+                   {PAD_A, XINPUT_GAMEPAD_A},                 {PAD_B, XINPUT_GAMEPAD_B},
+                   {PAD_X, XINPUT_GAMEPAD_X},                 {PAD_Y, XINPUT_GAMEPAD_Y},
+                   {PAD_BLACK, XINPUT_GAMEPAD_RIGHT_SHOULDER}, {PAD_WHITE, XINPUT_GAMEPAD_LEFT_SHOULDER}};
+    for (auto& b : buttons)
+        if (down(b.control)) g.wButtons |= b.button;
+    if (down(PAD_LEFT_TRIGGER)) g.bLeftTrigger = 255;
+    if (down(PAD_RIGHT_TRIGGER)) g.bRightTrigger = 255;
+    // A stick follows the keys only while one of its keys is held.
+    auto axis = [&](SHORT& v, PadControl plus, PadControl minus) {
+        int k = (down(plus) ? 32767 : 0) - (down(minus) ? 32767 : 0);
+        if (k) v = (SHORT)k;
+    };
+    axis(g.sThumbLX, PAD_LSTICK_RIGHT, PAD_LSTICK_LEFT);
+    axis(g.sThumbLY, PAD_LSTICK_UP, PAD_LSTICK_DOWN);
+    axis(g.sThumbRX, PAD_RSTICK_RIGHT, PAD_RSTICK_LEFT);
+    axis(g.sThumbRY, PAD_RSTICK_UP, PAD_RSTICK_DOWN);
+}
+
 static void virtual_state(XINPUT_STATE* st) {
     static std::vector<ScriptPress> script = parse_script();
     static bool monkey = getenv("NL_MONKEY") != nullptr;
@@ -119,26 +156,7 @@ static void virtual_state(XINPUT_STATE* st) {
             if (p.analog == 2) g.wButtons |= XINPUT_GAMEPAD_X;
             if (p.analog == 3) g.wButtons |= XINPUT_GAMEPAD_Y;
         }
-    if (host_window_focused()) {
-        auto key = [](int vk) { return (GetAsyncKeyState(vk) & 0x8000) != 0; };
-        static const struct {
-            int vk;
-            u16 button;
-        } keys[] = {{VK_UP, XINPUT_GAMEPAD_DPAD_UP},   {VK_DOWN, XINPUT_GAMEPAD_DPAD_DOWN},
-                    {VK_LEFT, XINPUT_GAMEPAD_DPAD_LEFT}, {VK_RIGHT, XINPUT_GAMEPAD_DPAD_RIGHT},
-                    {VK_RETURN, XINPUT_GAMEPAD_START}, {VK_BACK, XINPUT_GAMEPAD_BACK},
-                    {VK_SPACE, XINPUT_GAMEPAD_A},      {'E', XINPUT_GAMEPAD_B},
-                    {'Q', XINPUT_GAMEPAD_X},           {'F', XINPUT_GAMEPAD_Y},
-                    {'C', XINPUT_GAMEPAD_RIGHT_SHOULDER}, {'Z', XINPUT_GAMEPAD_LEFT_SHOULDER}};
-        for (auto& k : keys)
-            if (key(k.vk)) g.wButtons |= k.button;
-        g.sThumbLX = (SHORT)((key('D') ? 32767 : 0) - (key('A') ? 32767 : 0));
-        g.sThumbLY = (SHORT)((key('W') ? 32767 : 0) - (key('S') ? 32767 : 0));
-        g.sThumbRX = (SHORT)((key('L') ? 32767 : 0) - (key('J') ? 32767 : 0));
-        g.sThumbRY = (SHORT)((key('I') ? 32767 : 0) - (key('K') ? 32767 : 0));
-        g.bLeftTrigger = key(VK_TAB) ? 255 : 0;
-        g.bRightTrigger = key('R') ? 255 : 0;
-    }
+    keyboard_state(g);
     static XINPUT_GAMEPAD last;
     if (memcmp(&g, &last, sizeof g)) packet++;
     last = g;
@@ -156,8 +174,9 @@ static bool poll(int port, XINPUT_STATE* out) {
         if (out) virtual_state(out);
         return true;
     }
+    bool keyboard = port == 0 && settings().keyboard;
     if (!p.connected && now < p.next_probe_ms) {
-        if (port == 0 && g_virtual) {
+        if (keyboard) {
             if (out) virtual_state(out);
             return true;
         }
@@ -166,13 +185,14 @@ static bool poll(int port, XINPUT_STATE* out) {
     if (XInputGetState(port, &st) != ERROR_SUCCESS) {
         p.connected = false;
         p.next_probe_ms = now + 1000;
-        if (port == 0 && g_virtual) {
+        if (keyboard) {
             if (out) virtual_state(out);
             return true;
         }
         return false;
     }
     p.connected = true;
+    if (keyboard) keyboard_state(st.Gamepad);
     if (out) *out = st;
     return true;
 }
@@ -249,7 +269,8 @@ void hle_XInputGetState(Ctx* c) {
     XINPUT_STATE st;
     if (port < 0 || !poll(port, &st)) return hle_return(c, ERROR_DEVICE_NOT_CONNECTED_, 8);
     Pad& p = g_pads[port];
-    if (st.dwPacketNumber != p.last.dwPacketNumber) p.packet++;
+    // The keyboard can change the state without XInput's packet number moving.
+    if (st.dwPacketNumber != p.last.dwPacketNumber || memcmp(&st.Gamepad, &p.last.Gamepad, sizeof st.Gamepad)) p.packet++;
     p.last = st;
     const XINPUT_GAMEPAD& g = st.Gamepad;
     // Digital buttons share bit positions for d-pad, start, back and sticks.
