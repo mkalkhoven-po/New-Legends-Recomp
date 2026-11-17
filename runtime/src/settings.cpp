@@ -28,6 +28,11 @@ Aspect=Original
 ; Smooth=1 scales the picture smoothly, Smooth=0 keeps sharp pixels.
 Smooth=1
 
+[Controller]
+; Aiming and looking up and down. InvertAim=0: push the stick up to look up.
+; InvertAim=1: push up to look down, as the game does on the Xbox.
+InvertAim=0
+
 [Keyboard]
 ; The keyboard works as a controller (combined with a real one if plugged in).
 Enabled=1
@@ -116,6 +121,8 @@ static void apply(Settings& s, const std::string& section, const std::string& ke
             else log_msg("settings: line %d: Aspect must be Original or Stretch", line);
             return;
         }
+    } else if (!_stricmp(section.c_str(), "Controller")) {
+        if (!_stricmp(k, "InvertAim")) return void(s.invert_aim = to_bool(value));
     } else if (!_stricmp(section.c_str(), "Keyboard")) {
         if (!_stricmp(k, "Enabled")) return void(s.keyboard = to_bool(value));
         for (int c = 0; c < PAD_CONTROL_COUNT; c++) {

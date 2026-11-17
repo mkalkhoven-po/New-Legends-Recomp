@@ -22,6 +22,7 @@ struct Settings {
     Aspect aspect = Aspect::Original;
     bool smooth = true;  // linear filtering when scaling the picture
     bool keyboard = true;
+    bool invert_aim = false;  // true: stick up looks down, as the game does on the Xbox
     std::vector<int> keys[PAD_CONTROL_COUNT];  // Windows virtual-key codes
 };
 

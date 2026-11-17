@@ -14,10 +14,18 @@ static std::condition_variable g_vblank_cv;
 static u64 g_vblanks;
 
 // The FIFO waits here at a flip: frames go out at the console's 60 Hz.
+static double g_vblank_wait_ms;
+double video_vblank_wait_ms() { return g_vblank_wait_ms; }
+
 void video_wait_vblank() {
+    LARGE_INTEGER t0, t1, f;
+    QueryPerformanceCounter(&t0);
     std::unique_lock<std::mutex> lk(g_vblank_m);
     u64 seen = g_vblanks;
     g_vblank_cv.wait(lk, [&] { return g_vblanks != seen; });
+    QueryPerformanceCounter(&t1);
+    QueryPerformanceFrequency(&f);
+    g_vblank_wait_ms += (double)(t1.QuadPart - t0.QuadPart) * 1000.0 / (double)f.QuadPart;
 }
 
 void video_set_scanout(u32 phys) { g_scanout = phys; }

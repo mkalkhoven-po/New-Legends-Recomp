@@ -154,6 +154,7 @@ struct Kelvin {
     float constants[192][4];
     float inline_attr[16][4];  // current value of each vertex attribute
     u32 program_load, constant_load;
+    u32 program_version;  // bumped on every write to `program`
     u32 flip_read, flip_write, flip_modulo;
 
     u32 r(u32 method) const { return regs[method / 4]; }
@@ -203,5 +204,7 @@ struct VsInputs {
     u16 packed;   // NV097 CMP format
 };
 
-std::string gen_vertex_shader(const Kelvin& k, VsInputs in);
-std::string gen_fragment_shader(const Kelvin& k, const TextureDesc* tex, u32 tex_mask);
+// GLSL for the current state. Cached: the same state gives the same string
+// object, which lives for the rest of the run.
+const std::string* vertex_shader(const Kelvin& k, VsInputs in);
+const std::string* fragment_shader(const Kelvin& k, const TextureDesc* tex, u32 tex_mask);

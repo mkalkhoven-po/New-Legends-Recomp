@@ -53,7 +53,7 @@ struct VertexLayout {
 };
 
 struct DrawCall {
-    std::string vs, fs;  // GLSL
+    const std::string *vs, *fs;  // GLSL (cached strings, see vertex_shader)
     PipelineState ps;
     VertexLayout layout;
     const void* vertices;  // vertex data, `count` vertices of layout.stride bytes

@@ -96,14 +96,24 @@ void pgraph_init_backend();
 
 void crash_register_thread(u32 id);
 
+// NL_TRACE_FPS: time the FIFO thread had nothing to do (waiting for the game).
+static double g_idle_ms;
+double pfifo_idle_ms() { return g_idle_ms; }
+
 static DWORD WINAPI gpu_thread(void*) {
+    LARGE_INTEGER freq;
+    QueryPerformanceFrequency(&freq);
     crash_register_thread(1000);  // shows as "guest thread 1000" in watchdog dumps
     pgraph_init_backend();
     for (;;) {
         {
+            LARGE_INTEGER t0, t1;
+            QueryPerformanceCounter(&t0);
             std::unique_lock<std::mutex> lk(g_kick_m);
             g_kick_cv.wait(lk, [] { return g_kicked; });
             g_kicked = false;
+            QueryPerformanceCounter(&t1);
+            g_idle_ms += (double)(t1.QuadPart - t0.QuadPart) * 1000.0 / (double)freq.QuadPart;
         }
         g_busy = 1;
         run_pusher();

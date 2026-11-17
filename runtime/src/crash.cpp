@@ -4,7 +4,9 @@
 
 #include <dbghelp.h>
 
+#include <algorithm>
 #include <mutex>
+#include <unordered_map>
 #include <vector>
 
 #include "kernel.h"
@@ -282,10 +284,95 @@ static DWORD WINAPI watchdog(void* p) {
     }
 }
 
+// NL_PROFILE=id: sample that thread (1000 = the GPU/FIFO thread, otherwise a
+// guest thread id) about 1000 times a second and every 10 s print the
+// functions it spends the most time in: "self" counts the function the thread
+// was in, "total" also counts the functions that called it.
+static DWORD WINAPI profiler(void* p) {
+    u32 id = (u32)(uintptr_t)p;
+    HANDLE th = nullptr;
+    while (!th) {
+        Sleep(100);
+        std::lock_guard<std::mutex> lk(g_threads_m);
+        for (auto& t : g_threads)
+            if (t.first == id) th = t.second;
+    }
+    timeBeginPeriod(1);
+    HANDLE proc = GetCurrentProcess();
+    std::unordered_map<DWORD64, u32> self, total;  // by function start address
+    u32 samples = 0;
+    DWORD last_report = GetTickCount();
+    auto func_of = [&](DWORD64 pc) -> DWORD64 {
+        char buf[sizeof(SYMBOL_INFO) + 256];
+        SYMBOL_INFO* sym = (SYMBOL_INFO*)buf;
+        sym->SizeOfStruct = sizeof(SYMBOL_INFO);
+        sym->MaxNameLen = 255;
+        DWORD64 disp = 0;
+        return SymFromAddr(proc, pc, &disp, sym) ? sym->Address : pc;
+    };
+    for (;;) {
+        Sleep(1);
+        if (SuspendThread(th) == (DWORD)-1) return 0;
+        CONTEXT c{};
+        c.ContextFlags = CONTEXT_FULL;
+        DWORD64 pcs[16];
+        int n = 0;
+        if (GetThreadContext(th, &c)) {
+            STACKFRAME64 f{};
+            f.AddrPC.Offset = c.Rip;
+            f.AddrStack.Offset = c.Rsp;
+            f.AddrFrame.Offset = c.Rbp;
+            f.AddrPC.Mode = f.AddrStack.Mode = f.AddrFrame.Mode = AddrModeFlat;
+            while (n < 16 && StackWalk64(IMAGE_FILE_MACHINE_AMD64, proc, th, &f, &c, nullptr, SymFunctionTableAccess64,
+                                         SymGetModuleBase64, nullptr) &&
+                   f.AddrPC.Offset)
+                pcs[n++] = f.AddrPC.Offset;
+        }
+        ResumeThread(th);
+        if (!n) continue;
+        samples++;
+        DWORD64 seen[16];
+        int ns = 0;
+        for (int i = 0; i < n; i++) {
+            DWORD64 fn = func_of(pcs[i]);
+            if (i == 0) self[fn]++;
+            if (std::find(seen, seen + ns, fn) == seen + ns) {
+                seen[ns++] = fn;
+                total[fn]++;
+            }
+        }
+        if (GetTickCount() - last_report < 10000) continue;
+        last_report = GetTickCount();
+        auto print = [&](const char* title, std::unordered_map<DWORD64, u32>& m) {
+            std::vector<std::pair<u32, DWORD64>> v;
+            for (auto& e : m) v.push_back({e.second, e.first});
+            std::sort(v.rbegin(), v.rend());
+            fprintf(stderr, "--- profile thread %u, %u samples, %s:\n", id, samples, title);
+            for (size_t i = 0; i < v.size() && i < 25; i++) {
+                char buf[sizeof(SYMBOL_INFO) + 256];
+                SYMBOL_INFO* sym = (SYMBOL_INFO*)buf;
+                sym->SizeOfStruct = sizeof(SYMBOL_INFO);
+                sym->MaxNameLen = 255;
+                DWORD64 disp = 0;
+                const char* name = SymFromAddr(proc, v[i].second, &disp, sym) ? sym->Name : "?";
+                fprintf(stderr, "  %5.1f%%  %s\n", 100.0 * v[i].first / samples, name);
+            }
+        };
+        print("self", self);
+        print("total", total);
+        fflush(stderr);
+        self.clear();
+        total.clear();
+        samples = 0;
+    }
+}
+
 void crash_init() {
     SymSetOptions(SYMOPT_UNDNAME | SYMOPT_DEFERRED_LOADS);
     SymInitialize(GetCurrentProcess(), nullptr, TRUE);
     AddVectoredExceptionHandler(1, on_exception);
+    if (const char* p = getenv("NL_PROFILE"))
+        CloseHandle(CreateThread(nullptr, 0, profiler, (void*)(uintptr_t)atoi(p), 0, nullptr));
     if (const char* w = getenv("NL_WATCHDOG"))
         CloseHandle(CreateThread(nullptr, 0, watchdog, (void*)(uintptr_t)(atoi(w) * 1000), 0, nullptr));
 }

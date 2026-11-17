@@ -8,7 +8,9 @@
 #include <shaderc/shaderc.h>
 
 #include <condition_variable>
+#include <algorithm>
 #include <map>
+#include <set>
 #include <thread>
 #include <unordered_map>
 
@@ -213,9 +215,15 @@ static void create_swapchain() {
 
 static VkCommandBuffer cmd() { return g_frames[g_fi].cmd; }
 
+static double ms_since(const LARGE_INTEGER& t0);
+static double g_fence_wait_ms;  // NL_TRACE_FPS: total time waiting for the GPU
+
 static void begin_frame() {
     Frame& f = g_frames[g_fi];
+    LARGE_INTEGER t0;
+    QueryPerformanceCounter(&t0);
     VKCHECK(vkWaitForFences(g_dev, 1, &f.fence, VK_TRUE, UINT64_MAX));
+    g_fence_wait_ms += ms_since(t0);
     VKCHECK(vkResetFences(g_dev, 1, &f.fence));
     for (auto& g : f.garbage) {
         vkDestroyBuffer(g_dev, g.first, nullptr);
@@ -775,6 +783,7 @@ struct TexEntry {
     Image im;
     u64 hash;
     u32 last_frame;
+    u32 checked_frame = ~0u;  // the frame whose contents `hash` describes
 };
 static std::unordered_map<u64, TexEntry> g_textures;
 static u32 g_frame_no;
@@ -784,8 +793,21 @@ static std::map<u64, VkSampler> g_samplers;
 
 static u64 fnv(const void* p, size_t n, u64 h = 1469598103934665603ull) {
     const u8* b = (const u8*)p;
-    // Word-at-a-time FNV variant: fast enough for per-draw texture checks.
+    // Word-at-a-time FNV variant in four independent lanes, so the
+    // multiplications overlap instead of waiting for each other.
     size_t i = 0;
+    u64 l1 = h ^ 0x9E3779B97F4A7C15ull, l2 = h ^ 0xC2B2AE3D27D4EB4Full, l3 = h ^ 0x165667B19E3779F9ull;
+    for (; i + 32 <= n; i += 32) {
+        u64 w[4];
+        memcpy(w, b + i, 32);
+        h = (h ^ w[0]) * 1099511628211ull;
+        l1 = (l1 ^ w[1]) * 1099511628211ull;
+        l2 = (l2 ^ w[2]) * 1099511628211ull;
+        l3 = (l3 ^ w[3]) * 1099511628211ull;
+    }
+    h = (h ^ l1 * 31) * 1099511628211ull;
+    h = (h ^ l2 * 37) * 1099511628211ull;
+    h = (h ^ l3 * 41) * 1099511628211ull;
     for (; i + 8 <= n; i += 8) {
         u64 w;
         memcpy(&w, b + i, 8);
@@ -827,10 +849,15 @@ static Image* texture(const TextureDesc& d) {
     u32 bytes = texture_size(d);
     if (!bytes) return d.cube ? &g_dummy_cube : &g_dummy_tex;
     u64 key = fnv(&d, offsetof(TextureDesc, address));
-    u64 h = fnv(gptr(d.addr), bytes);
-    if (d.palette_addr) h = fnv(gptr(d.palette_addr), d.palette_len * 4, h);
     TexEntry& e = g_textures[key];
     e.last_frame = g_frame_no;
+    // Contents are checked once per frame: draws later in the same frame
+    // reuse the result (hashing every texture per draw cost ~17% of the GPU
+    // thread).
+    if (e.im.img && e.checked_frame == g_frame_no) return &e.im;
+    e.checked_frame = g_frame_no;
+    u64 h = fnv(gptr(d.addr), bytes);
+    if (d.palette_addr) h = fnv(gptr(d.palette_addr), d.palette_len * 4, h);
     if (e.im.img && e.hash == h) return &e.im;
     DecodedTexture t;
     if (!decode_texture(d, t)) return d.cube ? &g_dummy_cube : &g_dummy_tex;
@@ -889,8 +916,15 @@ void vkb_draw(const DrawCall& d) {
     if (!begin_rendering()) return;
 
     PipeKey k{};
-    k.vs = shader_module(d.vs, false);
-    k.fs = shader_module(d.fs, true);
+    // The generator hands out one string object per distinct shader, so the
+    // pointer is enough to find its module without hashing the text.
+    static std::unordered_map<const std::string*, VkShaderModule> by_ptr;
+    auto mod = [&](const std::string* s, bool frag) {
+        auto it = by_ptr.find(s);
+        return it != by_ptr.end() ? it->second : (by_ptr[s] = shader_module(*s, frag));
+    };
+    k.vs = mod(d.vs, false);
+    k.fs = mod(d.fs, true);
     k.ps = d.ps;
     k.layout = d.layout;
     k.color = g_cur_color ? g_cur_color->fmt : VK_FORMAT_UNDEFINED;
@@ -948,7 +982,7 @@ void vkb_draw(const DrawCall& d) {
 // NL_DUMP_FRAMES=n writes every n-th presented frame to frames/NNNNN.bmp.
 static u32 g_dump_every = getenv("NL_DUMP_FRAMES") ? (u32)atoi(getenv("NL_DUMP_FRAMES")) : 0;
 
-static void dump_frame(Image& src, u32 w, u32 h) {
+static void dump_frame(Image& src, u32 w, u32 h, u32 rt_addr = 0) {
     VkBufferCreateInfo bci{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
     bci.size = (VkDeviceSize)w * h * 4;
     bci.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
@@ -980,7 +1014,8 @@ static void dump_frame(Image& src, u32 w, u32 h) {
     VKCHECK(vkMapMemory(g_dev, mem, 0, bci.size, 0, (void**)&px));
     CreateDirectoryA("frames", nullptr);
     char name[64];
-    snprintf(name, sizeof name, "frames/%05u.bmp", g_frame_no);
+    if (rt_addr) snprintf(name, sizeof name, "frames/%05u_%08X.bmp", g_frame_no, rt_addr);
+    else snprintf(name, sizeof name, "frames/%05u.bmp", g_frame_no);
     if (FILE* f = fopen(name, "wb")) {
         BITMAPFILEHEADER fh{0x4D42, (DWORD)(54 + bci.size), 0, 0, 54};
         BITMAPINFOHEADER ih{sizeof ih, (LONG)w, -(LONG)h, 1, 32, BI_RGB};
@@ -993,7 +1028,43 @@ static void dump_frame(Image& src, u32 w, u32 h) {
     vkFreeMemory(g_dev, mem, nullptr);
 }
 
+// NL_TRACE_FPS: every 300 frames, the spread of frame times (present to
+// present) and where the FIFO thread waited: for the next vblank (the game
+// is ahead) or for the GPU (fence wait in begin_frame).
+static bool g_trace_fps = getenv("NL_TRACE_FPS") != nullptr;
+double video_vblank_wait_ms();  // video.cpp: total time spent in video_wait_vblank
+double pfifo_idle_ms();         // pfifo.cpp: total time the FIFO waited for the game
+
+static void trace_fps() {
+    static std::vector<double> intervals;
+    static LARGE_INTEGER last;
+    static double fence0, vblank0, idle0;
+    LARGE_INTEGER now;
+    QueryPerformanceCounter(&now);
+    if (last.QuadPart) intervals.push_back(ms_since(last));
+    last = now;
+    if (intervals.size() < 300) return;
+    std::vector<double> v = intervals;
+    std::sort(v.begin(), v.end());
+    double sum = 0;
+    u32 long_frames = 0;
+    for (double x : v) {
+        sum += x;
+        if (x > 25) long_frames++;
+    }
+    double vb = video_vblank_wait_ms();
+    log_msg("fps: %.1f, frame ms p50 %.1f p90 %.1f p99 %.1f max %.1f, %u over 25 ms; per frame: vblank wait %.1f ms, "
+            "gpu wait %.1f ms, waiting for the game %.1f ms",
+            1000.0 * v.size() / sum, v[v.size() / 2], v[v.size() * 9 / 10], v[v.size() * 99 / 100], v.back(), long_frames,
+            (vb - vblank0) / v.size(), (g_fence_wait_ms - fence0) / v.size(), (pfifo_idle_ms() - idle0) / v.size());
+    idle0 = pfifo_idle_ms();
+    vblank0 = vb;
+    fence0 = g_fence_wait_ms;
+    intervals.clear();
+}
+
 void vkb_present(u32 color_addr) {
+    if (g_trace_fps) trace_fps();
     end_rendering();
     Frame& f = g_frames[g_fi];
     auto it = g_color_surfaces.find(color_addr);
@@ -1002,6 +1073,7 @@ void vkb_present(u32 color_addr) {
         create_swapchain();
     }
     u32 idx = 0, dump_w = 0, dump_h = 0;
+    std::vector<std::pair<u32, Image*>> dump_rts;
     Image* dump_src = nullptr;
     bool have_image = false;
     if (g_swapchain) {
@@ -1049,7 +1121,21 @@ void vkb_present(u32 color_addr) {
             bl.dstOffsets[1] = {dx + dw, dy + dh, 1};
             vkCmdBlitImage(cmd(), src.img, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, dst, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
                            1, &bl, settings().smooth ? VK_FILTER_LINEAR : VK_FILTER_NEAREST);
-            if (g_dump_every && g_frame_no % g_dump_every == 0) dump_w = sw, dump_h = sh, dump_src = &src;
+            if (g_dump_every && g_frame_no % g_dump_every == 0) {
+                dump_w = sw, dump_h = sh, dump_src = &src;
+                // NL_DUMP_RT=addr,addr: these render targets too (debugging
+                // render-to-texture effects such as the water simulation).
+                if (const char* list = getenv("NL_DUMP_RT"))
+                    for (const char* p = list; *p;) {
+                        u32 a = (u32)strtoul(p, (char**)&p, 16);
+                        auto rt = g_color_surfaces.find(a);
+                        if (rt != g_color_surfaces.end() && &rt->second != &src) {
+                            transition(rt->second, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+                            dump_rts.push_back({a, &rt->second});
+                        }
+                        while (*p == ',') p++;
+                    }
+            }
         }
         b.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
         b.dstAccessMask = 0;
@@ -1084,6 +1170,7 @@ void vkb_present(u32 color_addr) {
     if (dump_src) {
         vkQueueWaitIdle(g_queue);
         dump_frame(*dump_src, dump_w, dump_h);
+        for (auto& d : dump_rts) dump_frame(*d.second, d.second->w, d.second->h, d.first);
     }
     g_fi = (g_fi + 1) % FRAMES;
     g_frame_no++;

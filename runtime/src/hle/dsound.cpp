@@ -20,6 +20,11 @@
 constexpr u32 STREAM_VTABLE = 0x00263928;  // XDK vtable; its entries are overridden below
 constexpr float PI = 3.14159265f;
 constexpr s32 DEFAULT_HEADROOM = 600;  // hundredths of a dB, as DirectSound sets it
+// 3D voices get no headroom, but on the Xbox they pass the HRTF filters, which
+// leave them well below a 2D voice at the same volume. Without this loss,
+// footsteps and weapons drowned out speech (playtest); 6 dB matches the 2D
+// headroom and puts effects just under the voices again.
+constexpr s32 HRTF_PATH_LOSS = 600;
 
 constexpr u32 S_OK_ = 0, E_OUTOFMEMORY_ = 0x8007000E, E_FAIL_ = 0x80004005;
 constexpr u32 DSERR_STREAM_FULL = 0x88780032;
@@ -95,6 +100,8 @@ struct Voice {
     float min_dist = 1, max_dist = 1e9f;
 
     float last_l = 0, last_r = 0;  // gains of the previous block, for ramping
+    float meter_in = 0, meter_out = 0;  // NL_TRACE_DSOUND level meter: peaks since the last report
+    u32 starved = 0;                    // blocks a stream ran dry
 
     // ADPCM: the block decoded last (buffers).
     s64 cached_block = -1;
@@ -264,13 +271,15 @@ static void voice_gains(Voice* v, float& l, float& r, double& pitch) {
     float dc = d < v->min_dist ? v->min_dist : d > v->max_dist ? v->max_dist : d;
     float denom = v->min_dist + g_listener.rolloff * (dc - v->min_dist);
     gain *= denom > 1e-6f ? v->min_dist / denom : 1.0f;
+    gain *= powf(10.0f, -HRTF_PATH_LOSS / 2000.0f);
     if (v->fmt.channels == 1) {
-        // Constant-power pan from the listener's right axis.
+        // Constant-power pan from the listener's right axis: -3 dB per side in
+        // front, so a mono voice keeps its power wherever it is.
         Vec right = normalized(cross(g_listener.top, g_listener.front));
         float x = d > 1e-3f ? dot(rel, right) / d : 0;
         float angle = (x + 1) * PI / 4;
-        l = cosf(angle) * 1.414f;
-        r = sinf(angle) * 1.414f;
+        l = cosf(angle);
+        r = sinf(angle);
     }
     l *= gain;
     r *= gain;
@@ -306,6 +315,7 @@ static void mix_voice(Voice* v, float* out, u32 frames) {
             while (i + 2 > v->fifo_end && stream_decode_next(v)) {
             }
             if (i + 2 > v->fifo_end) {
+                v->starved++;
                 // Starved: silence until the next packet. Everything queued
                 // counts as played, or the last packet would never complete.
                 v->pos = (double)v->fifo_end;
@@ -335,8 +345,11 @@ static void mix_voice(Voice* v, float* out, u32 frames) {
         float s0 = a[0] + (b[0] - a[0]) * t;
         float s1 = f.channels > 1 ? a[1] + (b[1] - a[1]) * t : s0;
         float fade = (float)n / frames;
-        out[2 * n] += s0 * (v->last_l + (gl - v->last_l) * fade);
-        out[2 * n + 1] += s1 * (v->last_r + (gr - v->last_r) * fade);
+        float ol = s0 * (v->last_l + (gl - v->last_l) * fade), orr = s1 * (v->last_r + (gr - v->last_r) * fade);
+        out[2 * n] += ol;
+        out[2 * n + 1] += orr;
+        v->meter_in = fmaxf(v->meter_in, fmaxf(fabsf(s0), fabsf(s1)));
+        v->meter_out = fmaxf(v->meter_out, fmaxf(fabsf(ol), fabsf(orr)));
         v->pos += step;
     }
     v->last_l = gl;
@@ -361,6 +374,29 @@ void dsound_mix(float* out, u32 frames) {
     for (auto& e : g_voices) {
         Voice* v = e.second;
         if (v->stream || v->playing) mix_voice(v, out, frames);
+    }
+    // NL_TRACE_DSOUND: every 2 s, each voice that made sound with its level
+    // before and after volume, distance and pan (dBFS), to compare voices.
+    static bool meter = getenv("NL_TRACE_DSOUND") != nullptr;
+    static u64 metered;
+    if (meter && (metered += frames) >= 2 * AUDIO_RATE) {
+        metered = 0;
+        float mix = 0;
+        for (u32 i = 0; i < frames * 2; i++) mix = fmaxf(mix, fabsf(out[i]));
+        log_msg("[meter] mix peak %.1f dB, rolloff %g, distance factor %g", 20 * log10f(mix + 1e-9f), g_listener.rolloff, g_listener.distance);
+        for (auto& e : g_voices) {
+            Voice* v = e.second;
+            if (v->meter_in > 0 || v->starved) {
+                float d = length(v->mode3d == DS3DMODE_HEADRELATIVE ? v->p3d : v->p3d - g_listener.pos);
+                log_msg("[meter] %08X %s %uch %5u Hz bytes %6X vol %5d room %3d 3d %d mode %u dist %7.0f min %6.0f max %7.0f"
+                        " in %6.1f out %6.1f dB starved %u",
+                        v->handle, v->stream ? "stream" : "buffer", v->fmt.channels, v->fmt.rate, v->bytes, v->volume,
+                        v->headroom, v->is3d, v->mode3d, d, v->min_dist, v->max_dist, 20 * log10f(v->meter_in + 1e-9f),
+                        20 * log10f(v->meter_out + 1e-9f), v->starved);
+            }
+            v->meter_in = v->meter_out = 0;
+            v->starved = 0;
+        }
     }
     // Soft limit instead of clipping when many voices add up.
     for (u32 i = 0; i < frames * 2; i++) {

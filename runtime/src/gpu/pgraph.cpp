@@ -1,5 +1,6 @@
 // PGRAPH: methods of the graphics objects (Kelvin 3D class 0x97 and the 2D
 // helpers) as they come out of the FIFO, turned into Vulkan work.
+#include <set>
 #include <condition_variable>
 #include <map>
 #include <unordered_map>
@@ -536,15 +537,16 @@ static void flush_draw() {
         d.depth_bias_factor = g_k.f(NV097_SET_POLYGON_OFFSET_SCALE_FACTOR);
         d.depth_bias_units = g_k.f(NV097_SET_POLYGON_OFFSET_BIAS);
     }
-    d.vs = gen_vertex_shader(g_k, in);
-    d.fs = gen_fragment_shader(g_k, d.tex, d.tex_mask);
+    d.vs = vertex_shader(g_k, in);
+    d.fs = fragment_shader(g_k, d.tex, d.tex_mask);
     static int trace_frame = getenv("NL_TRACE_DRAWS") ? atoi(getenv("NL_TRACE_DRAWS")) : -1;
     if ((int)vkb_frame_no() == trace_frame)
-        log_msg("[draw] tex0 %08X %ux%u pitch %u lin %u lv %u", d.tex[0].addr, d.tex[0].width, d.tex[0].height, d.tex[0].pitch,
-                d.tex[0].linear, d.tex[0].levels);
+        log_msg("[draw] rt %08X %ux%u fmt %d tex0 %08X %ux%u pitch %u lin %u lv %u tex1 %08X tex2 %08X tex3 %08X", rt.color_addr,
+                rt.width, rt.height, (int)rt.color, d.tex[0].addr, d.tex[0].width, d.tex[0].height, d.tex[0].pitch,
+                d.tex[0].linear, d.tex[0].levels, d.tex[1].addr, d.tex[2].addr, d.tex[3].addr);
     if ((int)vkb_frame_no() == trace_frame)
         log_msg("[draw] vs %04u fs %04u cull %u/%X/%X z %u/%u blend %u/%X/%X cmask %X prim %u n %zu mode %s light %u mask %X skin %u texgen %08X attrs %04X tex %X fmt %02X/%02X shader %08X comb %u",
-                vkb_shader_id(d.vs, false), vkb_shader_id(d.fs, true), g_k.r(NV097_SET_CULL_FACE_ENABLE),
+                vkb_shader_id(*d.vs, false), vkb_shader_id(*d.fs, true), g_k.r(NV097_SET_CULL_FACE_ENABLE),
                 g_k.r(NV097_SET_CULL_FACE), g_k.r(NV097_SET_FRONT_FACE), g_k.r(NV097_SET_DEPTH_TEST_ENABLE),
                 g_k.r(NV097_SET_DEPTH_MASK), g_k.r(NV097_SET_BLEND_ENABLE), g_k.r(NV097_SET_BLEND_FUNC_SFACTOR),
                 g_k.r(NV097_SET_BLEND_FUNC_DFACTOR), g_k.r(NV097_SET_COLOR_MASK), prim, d.indices.size(), (g_k.r(NV097_SET_TRANSFORM_EXECUTION_MODE) & 3) == 2 ? "prog" : "ff",
@@ -556,8 +558,8 @@ static void flush_draw() {
     // NL_DEBUG_VS=text: dump constants and the first vertex of a few draws
     // whose vertex shader contains the text.
     static const char* dbg_vs = getenv("NL_DEBUG_VS");
-    static int dbg_left = 3;
-    if (dbg_vs && dbg_left > 0 && vkb_frame_no() > 2000 && d.vs.find(dbg_vs) != std::string::npos) {
+    static int dbg_left = getenv("NL_DEBUG_VS_COUNT") ? atoi(getenv("NL_DEBUG_VS_COUNT")) : 3;
+    if (dbg_vs && dbg_left > 0 && vkb_frame_no() > 2000 && d.vs->find(dbg_vs) != std::string::npos) {
         dbg_left--;
         log_msg("[dbgvs] frame %u prim %u verts %u stride %u", vkb_frame_no(), prim, d.vertex_bytes / (d.layout.stride ? d.layout.stride : 1), d.layout.stride);
         for (u32 i = 0; i < 16; i++)
@@ -567,13 +569,25 @@ static void flush_draw() {
                 log_msg("  v%u type %u size %u: %02X %02X %02X %02X  %08X %08X %08X %08X", i, f.type, f.size, p[0], p[1], p[2], p[3],
                         *(u32*)p, *(u32*)(p + 4), *(u32*)(p + 8), *(u32*)(p + 12));
             }
-        for (u32 c : {11u, 17u, 18u, 19u, 20u, 28u, 29u, 30u, 31u, 32u, 33u, 34u, 35u, 58u, 59u, 96u, 97u, 98u, 99u, 100u, 101u})
-            log_msg("  c[%u] = %g %g %g %g", c, g_k.constants[c][0], g_k.constants[c][1], g_k.constants[c][2], g_k.constants[c][3]);
+        // Every constant the shader reads, and the bound textures.
+        std::set<u32> used;
+        for (size_t at = d.vs->find("u.c["); at != std::string::npos; at = d.vs->find("u.c[", at + 4))
+            used.insert((u32)atoi(d.vs->c_str() + at + 4));
+        for (u32 c : used)
+            if (c < 192)
+                log_msg("  c[%u] = %g %g %g %g", c, g_k.constants[c][0], g_k.constants[c][1], g_k.constants[c][2], g_k.constants[c][3]);
+        for (u32 i = 0; i < 4; i++)
+            if (d.tex_mask >> i & 1)
+                log_msg("  tex%u %08X fmt %02X %ux%u cube %u levels %u filter %08X", i, d.tex[i].addr, d.tex[i].format,
+                        d.tex[i].width, d.tex[i].height, d.tex[i].cube, d.tex[i].levels, d.tex[i].filter);
+        log_msg("  surface clip %08X %08X window clip %08X %08X", g_k.r(NV097_SET_SURFACE_CLIP_HORIZONTAL), g_k.r(NV097_SET_SURFACE_CLIP_VERTICAL), g_k.r(NV097_SET_WINDOW_CLIP_HORIZONTAL), g_k.r(NV097_SET_WINDOW_CLIP_VERTICAL));
+        log_msg("  texture shader %08X other input %08X dot rgb mapping %08X", g_k.r(NV097_SET_SHADER_STAGE_PROGRAM),
+                g_k.r(NV097_SET_SHADER_OTHER_STAGE_INPUT), g_k.r(NV097_SET_DOT_RGBMAPPING));
     }
     static const char* only_vs = getenv("NL_ONLY_VS");
-    if (only_vs && d.vs.find(only_vs) == std::string::npos) return;
+    if (only_vs && d.vs->find(only_vs) == std::string::npos) return;
     static const char* only_fs = getenv("NL_ONLY_FS");
-    if (only_fs && d.fs.find(only_fs) == std::string::npos) return;
+    if (only_fs && d.fs->find(only_fs) == std::string::npos) return;
     // NL_SKIP_TEX=lo-hi (hex): leave out draws whose first texture is in [lo, hi].
     static u32 skip_lo, skip_hi;
     static bool skip = [] {
@@ -624,6 +638,7 @@ static bool array_method(u32 m, u32 v) {
     if (m >= NV097_SET_TRANSFORM_PROGRAM && m < NV097_SET_TRANSFORM_PROGRAM + 0x80) {
         u32 slot = (m - NV097_SET_TRANSFORM_PROGRAM) / 4;
         if (g_k.program_load < 136) g_k.program[g_k.program_load][slot % 4] = v;
+        g_k.program_version++;
         if (slot % 4 == 3) g_k.program_load++;
     } else if (m >= NV097_SET_TRANSFORM_CONSTANT && m < NV097_SET_TRANSFORM_CONSTANT + 0x80) {
         u32 slot = (m - NV097_SET_TRANSFORM_CONSTANT) / 4;

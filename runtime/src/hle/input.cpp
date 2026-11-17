@@ -290,7 +290,10 @@ void hle_XInputGetState(Ctx* c) {
     wr16(out + 14, (u16)g.sThumbLX);
     wr16(out + 16, (u16)g.sThumbLY);
     wr16(out + 18, (u16)g.sThumbRX);
-    wr16(out + 20, (u16)g.sThumbRY);
+    // The game looks down when the right stick is pushed up; by default the
+    // axis is flipped so up looks up, as PC players expect.
+    s32 ry = settings().invert_aim ? g.sThumbRY : -(s32)g.sThumbRY;
+    wr16(out + 20, (u16)(s16)(ry > 32767 ? 32767 : ry));
     hle_return(c, ERROR_SUCCESS_, 8);
 }
 

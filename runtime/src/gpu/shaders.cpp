@@ -4,6 +4,8 @@
 #include <stdarg.h>
 
 #include <set>
+#include <unordered_map>
+#include <vector>
 
 #include "kelvin.h"
 
@@ -11,6 +13,20 @@
 static void warn_once(const char* what) {
     static std::set<std::string> seen;
     if (seen.insert(what).second) log_msg("[shader] %s", what);
+}
+
+// Every register the generators read goes through kr(), which remembers it.
+// A generated shader is then cached under the values of all registers read
+// so far: the generators are deterministic, so equal values give equal text.
+static std::vector<u16> g_dep_list;
+static std::vector<bool> g_dep_seen(0x2000 / 4);
+static u32 kr(const Kelvin& k, u32 method) {
+    u32 i = method / 4;
+    if (!g_dep_seen[i]) {
+        g_dep_seen[i] = true;
+        g_dep_list.push_back((u16)i);
+    }
+    return k.regs[i];
 }
 
 static void add(std::string& s, const char* fmt, ...) {
@@ -49,7 +65,7 @@ layout(std140, set = 0, binding = 0) uniform U {
 
 // Interpolants between the stages.
 static void varyings(std::string& s, const Kelvin& k, const char* dir) {
-    const char* flat = k.r(NV097_SET_SHADE_MODE) == 0x1D00 ? "flat " : "";
+    const char* flat = kr(k, NV097_SET_SHADE_MODE) == 0x1D00 ? "flat " : "";
     add(s, "layout(location = 0) %s%s vec4 vD0;\n", flat, dir);
     add(s, "layout(location = 1) %s%s vec4 vD1;\n", flat, dir);
     add(s, "layout(location = 2) %s%s vec4 vB0;\n", flat, dir);
@@ -123,7 +139,7 @@ static void vp_write(std::string& s, const std::string& dst, u32 mask, const cha
 
 static void translate_program(std::string& s, const Kelvin& k) {
     bool writes_consts = false;
-    u32 start = k.r(NV097_SET_TRANSFORM_PROGRAM_START);
+    u32 start = kr(k, NV097_SET_TRANSFORM_PROGRAM_START);
     for (u32 pc = start; pc < 136; pc++) {
         if (fld(k.program[pc], 3, 3 + 8, 1) == 0 && fld(k.program[pc], 3, 12, 4)) writes_consts = true;
         if (fld(k.program[pc], 3, 0, 1)) break;
@@ -208,7 +224,7 @@ static void row_transform(std::string& s, const char* dst, const char* v, const 
 static const char* material_src(u32 v) { return v == 1 ? "v3" : v == 2 ? "v4" : nullptr; }
 
 static void fixed_function(std::string& s, const Kelvin& k) {
-    if (k.r(NV097_SET_SKIN_MODE)) warn_once("fixed-function skinning not supported");
+    if (kr(k, NV097_SET_SKIN_MODE)) warn_once("fixed-function skinning not supported");
     s += "    vec4 tPos, cPos;\n";
     row_transform(s, "tPos", "v0", "u.modelView", 0);
     row_transform(s, "cPos", "v0", "u.composite", 0);
@@ -218,15 +234,15 @@ static void fixed_function(std::string& s, const Kelvin& k) {
     s += "    vec3 N = normalize(vec3(dot(vec4(v2.xyz, 0.0), u.invModelView[0]), dot(vec4(v2.xyz, 0.0), u.invModelView[1]), "
          "dot(vec4(v2.xyz, 0.0), u.invModelView[2])));\n";
 
-    if (k.r(NV097_SET_LIGHTING_ENABLE)) {
-        u32 cm = k.r(NV097_SET_COLOR_MATERIAL);
+    if (kr(k, NV097_SET_LIGHTING_ENABLE)) {
+        u32 cm = kr(k, NV097_SET_COLOR_MATERIAL);
         u32 emission_src = cm & 3, ambient_src = cm >> 2 & 3, diffuse_src = cm >> 4 & 3, specular_src = cm >> 6 & 3;
         const char* alpha = diffuse_src == 1 ? "v3.a" : diffuse_src == 2 ? "v4.a" : "u.materialEmission.a";
         if (const char* a = material_src(ambient_src)) add(s, "    oD0 = vec4(%s.rgb * u.materialEmission.rgb, %s);\n", a, alpha);
         else add(s, "    oD0 = vec4(u.sceneAmbient.rgb, %s);\n", alpha);
         if (const char* e = material_src(emission_src)) add(s, "    oD0.rgb += %s.rgb;\n", e);
         s += "    vec3 lAmb = vec3(0.0), lDif = vec3(0.0), lSpec = vec3(0.0);\n";
-        u32 mask = k.r(NV097_SET_LIGHT_ENABLE_MASK);
+        u32 mask = kr(k, NV097_SET_LIGHT_ENABLE_MASK);
         for (int i = 0; i < 8; i++) {
             u32 mode = mask >> (2 * i) & 3;
             if (!mode) continue;
@@ -255,7 +271,7 @@ static void fixed_function(std::string& s, const Kelvin& k) {
         if (const char* d = material_src(diffuse_src)) add(s, "    oD0.rgb += %s.rgb * lDif;\n", d);
         else s += "    oD0.rgb += lDif;\n";
         s += "    oD1 = vec4(0.0, 0.0, 0.0, v4.a);\n";
-        if (k.r(NV097_SET_SPECULAR_ENABLE)) {
+        if (kr(k, NV097_SET_SPECULAR_ENABLE)) {
             if (const char* sp = material_src(specular_src)) add(s, "    oD1.rgb += %s.rgb * lSpec;\n", sp);
             else s += "    oD1.rgb += lSpec;\n";
         }
@@ -269,7 +285,7 @@ static void fixed_function(std::string& s, const Kelvin& k) {
     for (int i = 0; i < 4; i++) {
         add(s, "    { vec4 t = v%d;\n", 9 + i);
         for (int j = 0; j < 4; j++) {
-            u32 mode = k.r(NV097_SET_TEXGEN_S + 0x10 * i + 4 * j);
+            u32 mode = kr(k, NV097_SET_TEXGEN_S + 0x10 * i + 4 * j);
             char c = "xyzw"[j];
             int plane = 4 * i + j;
             switch (mode) {
@@ -292,7 +308,7 @@ static void fixed_function(std::string& s, const Kelvin& k) {
             }
             }
         }
-        if (k.r(NV097_SET_TEXTURE_MATRIX_ENABLE + 4 * i)) {
+        if (kr(k, NV097_SET_TEXTURE_MATRIX_ENABLE + 4 * i)) {
             char dst[8];
             snprintf(dst, sizeof dst, "oT%d", i);
             row_transform(s, dst, "t", "u.texMatrix", 4 * i);
@@ -303,7 +319,7 @@ static void fixed_function(std::string& s, const Kelvin& k) {
     }
 
     // Fog distance by the generation mode.
-    switch (k.r(NV097_SET_FOG_GEN_MODE)) {
+    switch (kr(k, NV097_SET_FOG_GEN_MODE)) {
     case 0: s += "    float fogDist = v4.a;\n"; break;          // specular alpha
     case 1: s += "    float fogDist = length(eyeP);\n"; break;  // radial
     case 2: s += "    float fogDist = eyeP.z;\n"; break;        // planar
@@ -314,8 +330,8 @@ static void fixed_function(std::string& s, const Kelvin& k) {
 
 // Fog factor from the distance (both transform modes), into oFog.
 static void fog_factor(std::string& s, const Kelvin& k) {
-    if (!k.r(NV097_SET_FOG_ENABLE)) return;
-    switch (k.r(NV097_SET_FOG_MODE)) {
+    if (!kr(k, NV097_SET_FOG_ENABLE)) return;
+    switch (kr(k, NV097_SET_FOG_MODE)) {
     case 0x800: case 0x802:  // EXP
         s += "    oFog = vec4(u.fogParams.x + exp2(fogDist * u.fogParams.y * 16.0) - 1.5);\n";
         break;
@@ -328,7 +344,7 @@ static void fog_factor(std::string& s, const Kelvin& k) {
     }
 }
 
-std::string gen_vertex_shader(const Kelvin& k, VsInputs in) {
+static std::string gen_vertex_shader(const Kelvin& k, VsInputs in) {
     std::string s = "#version 450\n";
     s += kUniforms;
     for (int i = 0; i < 16; i++)
@@ -376,7 +392,7 @@ void main() {
     vec4 oT0 = vec4(0.0, 0.0, 0.0, 1.0), oT1 = oT0, oT2 = oT0, oT3 = oT0;
     vec4 oUnk1, oUnk2, oUnk13, oUnk14, oUnk15;
 )";
-    bool program = (k.r(NV097_SET_TRANSFORM_EXECUTION_MODE) & 3) == 2;
+    bool program = (kr(k, NV097_SET_TRANSFORM_EXECUTION_MODE) & 3) == 2;
     if (program) {
         translate_program(s, k);
         s += "    float fogDist = oFog.x;\n";
@@ -390,7 +406,13 @@ void main() {
     float w = oPos.w;
     if (isinf(w) || isnan(w) || w == 0.0 || abs(w) >= VP_HUGE) w = 1.0;
     w = sign(w) * clamp(abs(w), 5.42101e-20, 1.84467e+19);
-    vec2 ndc = oPos.xy / u.surface.xy * 2.0 - 1.0;
+    // The NV2A truncates vertices to 1/16 pixel. Xbox D3D adds 0.53125 to
+    // screen positions, so a full-surface quad starts at 0.53125: truncated
+    // to 0.5, pixel 0 (centre 0.5) is covered by the top-left rule. Unsnapped
+    // or rounded, the first row and column stay unwritten, which left a flat
+    // border on the water ripple maps (squares on the water in 13Water).
+    vec2 snapped = floor(oPos.xy * 16.0) / 16.0;
+    vec2 ndc = snapped / u.surface.xy * 2.0 - 1.0;
     gl_Position = vec4(ndc * w, oPos.z * u.surface.z * w, w);
     vD0 = clamp(oD0, 0.0, 1.0); vD1 = clamp(oD1, 0.0, 1.0);
     vB0 = clamp(oB0, 0.0, 1.0); vB1 = clamp(oB1, 0.0, 1.0);
@@ -491,7 +513,7 @@ static void comb_stage(std::string& s, u32 icw, u32 ocw, bool alpha, bool msb_mu
     }
 }
 
-std::string gen_fragment_shader(const Kelvin& k, const TextureDesc* tex, u32 tex_mask) {
+static std::string gen_fragment_shader(const Kelvin& k, const TextureDesc* tex, u32 tex_mask) {
     std::string s = "#version 450\n";
     s += kUniforms;
     varyings(s, k, "in");
@@ -506,8 +528,8 @@ std::string gen_fragment_shader(const Kelvin& k, const TextureDesc* tex, u32 tex
     s += "    vec4 vT[4] = vec4[4](vT0, vT1, vT2, vT3);\n";
 
     // Texture shader stages.
-    u32 prog = k.r(NV097_SET_SHADER_STAGE_PROGRAM);
-    u32 other = k.r(NV097_SET_SHADER_OTHER_STAGE_INPUT), rgbmap = k.r(NV097_SET_DOT_RGBMAPPING);
+    u32 prog = kr(k, NV097_SET_SHADER_STAGE_PROGRAM);
+    u32 other = kr(k, NV097_SET_SHADER_OTHER_STAGE_INPUT), rgbmap = kr(k, NV097_SET_DOT_RGBMAPPING);
     s += "    float dot0 = 0.0, dot1 = 0.0, dot2 = 0.0, dot3 = 0.0;\n";
     for (int i = 0; i < 4; i++) {
         u32 mode = prog >> (5 * i) & 31;
@@ -597,26 +619,26 @@ std::string gen_fragment_shader(const Kelvin& k, const TextureDesc* tex, u32 tex
     }
 
     // Register combiners.
-    u32 ctl = k.r(NV097_SET_COMBINER_CONTROL);
+    u32 ctl = kr(k, NV097_SET_COMBINER_CONTROL);
     u32 stages = ctl & 0xFF;
     if (stages > 8) stages = 8;
     bool msb_mux = ctl >> 8 & 1, each_f0 = ctl >> 12 & 1, each_f1 = ctl >> 16 & 1;
     s += "    vec4 v0 = vD0, v1 = vD1;\n";
-    if (k.r(NV097_SET_TWO_SIDE_LIGHT_EN)) s += "    if (!gl_FrontFacing) { v0 = vB0; v1 = vB1; }\n";
+    if (kr(k, NV097_SET_TWO_SIDE_LIGHT_EN)) s += "    if (!gl_FrontFacing) { v0 = vB0; v1 = vB1; }\n";
     s += "    vec4 fog = vec4(u.fogColor.rgb, clamp(vFog.x, 0.0, 1.0));\n";
     s += "    vec4 r0 = vec4(0.0, 0.0, 0.0, t0.a), r1 = vec4(0.0);\n";
     s += "    vec4 C0, C1;\n";
     for (u32 st = 0; st < stages; st++) {
         add(s, "    // stage %u\n    C0 = u.factor0[%u]; C1 = u.factor1[%u];\n", st, each_f0 ? st : 0, each_f1 ? st : 0);
         s += "    {\n";
-        comb_stage(s, k.r(NV097_SET_COMBINER_COLOR_ICW + 4 * st), k.r(NV097_SET_COMBINER_COLOR_OCW + 4 * st), false, msb_mux);
+        comb_stage(s, kr(k, NV097_SET_COMBINER_COLOR_ICW + 4 * st), kr(k, NV097_SET_COMBINER_COLOR_OCW + 4 * st), false, msb_mux);
         s += "    }\n    {\n";
-        comb_stage(s, k.r(NV097_SET_COMBINER_ALPHA_ICW + 4 * st), k.r(NV097_SET_COMBINER_ALPHA_OCW + 4 * st), true, msb_mux);
+        comb_stage(s, kr(k, NV097_SET_COMBINER_ALPHA_ICW + 4 * st), kr(k, NV097_SET_COMBINER_ALPHA_OCW + 4 * st), true, msb_mux);
         s += "    }\n";
     }
 
     // Final combiner: rgb = A*B + (1-A)*C + D, alpha = G.
-    u32 cw0 = k.r(NV097_SET_COMBINER_SPECULAR_FOG_CW0), cw1 = k.r(NV097_SET_COMBINER_SPECULAR_FOG_CW1);
+    u32 cw0 = kr(k, NV097_SET_COMBINER_SPECULAR_FOG_CW0), cw1 = kr(k, NV097_SET_COMBINER_SPECULAR_FOG_CW1);
     s += "    C0 = u.factor0[0]; C1 = u.factor1[0];\n";
     if (cw1 >> 7 & 1) s += "    vec4 specR0 = vec4(clamp(r0.rgb + v1.rgb, 0.0, 1.0), 0.0);\n";
     else s += "    vec4 specR0 = vec4(r0.rgb + v1.rgb, 0.0);\n";
@@ -638,12 +660,61 @@ std::string gen_fragment_shader(const Kelvin& k, const TextureDesc* tex, u32 tex
         D.c_str(), G.c_str());
 
     // Alpha test.
-    if (k.r(NV097_SET_ALPHA_TEST_ENABLE)) {
+    if (kr(k, NV097_SET_ALPHA_TEST_ENABLE)) {
         static const char* cmp[] = {"false", "<", "==", "<=", ">", "!=", ">=", "true"};
-        u32 f = k.r(NV097_SET_ALPHA_FUNC) & 7;
+        u32 f = kr(k, NV097_SET_ALPHA_FUNC) & 7;
         if (f == 0) s += "    discard;\n";
         else if (f != 7) add(s, "    if (!(int(outc.a * 255.0 + 0.5) %s int(u.misc.x))) discard;\n", cmp[f]);
     }
     s += "    fragColor = outc;\n}\n";
     return s;
+}
+
+// ------------------------------------------------------------------ cache
+static u64 mix(u64 h, u64 v) { return (h ^ v) * 1099511628211ull; }
+
+static u64 state_key(const Kelvin& k, u64 h) {
+    for (u16 i : g_dep_list) h = mix(h, k.regs[i]);
+    return mix(h, g_dep_list.size());
+}
+
+// The transform program from its start to the instruction marked last; only
+// rehashed after the program memory or the start changed.
+static u64 program_key(const Kelvin& k) {
+    static u32 version = ~0u, start = ~0u;
+    static u64 h;
+    u32 s = k.regs[NV097_SET_TRANSFORM_PROGRAM_START / 4];
+    if (k.program_version != version || s != start) {
+        version = k.program_version;
+        start = s;
+        h = 1469598103934665603ull;
+        for (u32 pc = s; pc < 136; pc++) {
+            for (u32 w = 0; w < 4; w++) h = mix(h, k.program[pc][w]);
+            if (k.program[pc][3] & 1) break;
+        }
+    }
+    return h;
+}
+
+static std::unordered_map<u64, std::string> g_vs_cache, g_fs_cache;
+
+const std::string* vertex_shader(const Kelvin& k, VsInputs in) {
+    u64 extra = mix(program_key(k), ((u64)in.present << 16) | in.packed);
+    auto it = g_vs_cache.find(state_key(k, extra));
+    if (it != g_vs_cache.end()) return &it->second;
+    std::string s = gen_vertex_shader(k, in);
+    // Keyed after generating: the generator may have read new registers.
+    return &g_vs_cache.emplace(state_key(k, extra), std::move(s)).first->second;
+}
+
+const std::string* fragment_shader(const Kelvin& k, const TextureDesc* tex, u32 tex_mask) {
+    u64 extra = 0x51ED27;
+    for (u32 i = 0; i < 4; i++) {
+        bool on = tex_mask >> i & 1;
+        extra = mix(extra, on ? ((u64)(tex[i].filter >> 28) << 8 | (tex[i].control0 >> 2 & 1) << 4 | 1) : 0);
+    }
+    auto it = g_fs_cache.find(state_key(k, extra));
+    if (it != g_fs_cache.end()) return &it->second;
+    std::string s = gen_fragment_shader(k, tex, tex_mask);
+    return &g_fs_cache.emplace(state_key(k, extra), std::move(s)).first->second;
 }
