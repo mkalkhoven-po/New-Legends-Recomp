@@ -1,4 +1,4 @@
-// newlegends.ini: display and keyboard settings.
+// newlegends.ini: display, controller, mouse and keyboard settings.
 #include "settings.h"
 
 #include <windows.h>
@@ -33,30 +33,46 @@ Smooth=1
 ; InvertAim=1: push up to look down, as the game does on the Xbox.
 InvertAim=0
 
+[Mouse]
+; Look around with the mouse. The game window keeps the mouse pointer while
+; you play; Alt+Tab or clicking another window gives it back.
+Enabled=1
+; How fast the camera turns for a given mouse movement (1.0 = default).
+Sensitivity=1.0
+; InvertY=1: move the mouse up to look down.
+InvertY=0
+
 [Keyboard]
-; The keyboard works as a controller (combined with a real one if plugged in).
+; Keyboard and mouse buttons work as a controller, together with a real one
+; if it is plugged in. The defaults follow the game's own controller layout:
+;   A = jump, B = right hand attack, X = left hand attack, Y = parry,
+;   Black = next weapon, White = use, Left trigger = aim (hold),
+;   Right trigger = camera behind the player, Back = inventory, Start = menu,
+;   D-pad left/right = change weapon.
+;   Jump + left attack = dash attack, parry + right attack = super attack.
 Enabled=1
 ; Controller input = one or more keys, separated by commas.
 ; Key names: A-Z, 0-9, F1-F12, Space, Enter, Tab, Backspace, Escape, Shift,
 ; Ctrl, Alt, Up, Down, Left, Right, Insert, Delete, Home, End, PageUp,
-; PageDown, Numpad0-Numpad9, MouseLeft, MouseRight, MouseMiddle, or a
-; Windows virtual-key code such as 0xBA. Leave empty for no key.
+; PageDown, Numpad0-Numpad9, MouseLeft, MouseRight, MouseMiddle, MouseBack,
+; MouseForward, WheelUp, WheelDown, or a Windows virtual-key code such as
+; 0xBA. Leave empty for no key.
 A=Space
-B=E
-X=Q
-Y=F
-Black=C
-White=Z
-LeftTrigger=Tab
-RightTrigger=R
-Start=Enter
-Back=Backspace
-LeftThumb=V
-RightThumb=B
+B=MouseRight,Backspace
+X=MouseLeft
+Y=Shift
+Black=Q
+White=E
+LeftTrigger=Ctrl,MouseBack
+RightTrigger=MouseMiddle,R
+Start=Escape,Enter
+Back=Tab
+LeftThumb=
+RightThumb=
 DPadUp=Up
 DPadDown=Down
-DPadLeft=Left
-DPadRight=Right
+DPadLeft=Left,WheelUp
+DPadRight=Right,WheelDown
 LeftStickUp=W
 LeftStickDown=S
 LeftStickLeft=A
@@ -84,7 +100,8 @@ static const struct {
     {"Up", VK_UP},           {"Down", VK_DOWN},          {"Left", VK_LEFT},        {"Right", VK_RIGHT},
     {"Insert", VK_INSERT},   {"Delete", VK_DELETE},      {"Home", VK_HOME},        {"End", VK_END},
     {"PageUp", VK_PRIOR},    {"PageDown", VK_NEXT},      {"MouseLeft", VK_LBUTTON}, {"MouseRight", VK_RBUTTON},
-    {"MouseMiddle", VK_MBUTTON},
+    {"MouseMiddle", VK_MBUTTON}, {"MouseBack", VK_XBUTTON1}, {"MouseForward", VK_XBUTTON2},
+    {"WheelUp", KEY_WHEEL_UP}, {"WheelDown", KEY_WHEEL_DOWN},
 };
 
 static std::string trim(const std::string& s) {
@@ -123,6 +140,15 @@ static void apply(Settings& s, const std::string& section, const std::string& ke
         }
     } else if (!_stricmp(section.c_str(), "Controller")) {
         if (!_stricmp(k, "InvertAim")) return void(s.invert_aim = to_bool(value));
+    } else if (!_stricmp(section.c_str(), "Mouse")) {
+        if (!_stricmp(k, "Enabled")) return void(s.mouse = to_bool(value));
+        if (!_stricmp(k, "InvertY")) return void(s.mouse_invert_y = to_bool(value));
+        if (!_stricmp(k, "Sensitivity")) {
+            double v = atof(value.c_str());
+            if (v > 0 && v <= 20) s.mouse_sensitivity = (float)v;
+            else log_msg("settings: line %d: Sensitivity must be between 0 and 20", line);
+            return;
+        }
     } else if (!_stricmp(section.c_str(), "Keyboard")) {
         if (!_stricmp(k, "Enabled")) return void(s.keyboard = to_bool(value));
         for (int c = 0; c < PAD_CONTROL_COUNT; c++) {
@@ -188,7 +214,7 @@ static Settings load() {
     if (const char* v = getenv("NL_SESSION_FULLSCREEN")) s.fullscreen = *v == '1';
     if (const char* v = getenv("NL_SESSION_WINDOW"))
         sscanf(v, "%d,%d,%d,%d", &s.window_x, &s.window_y, &s.window_width, &s.window_height);
-    if (getenv("NL_NO_KEYBOARD")) s.keyboard = false;
+    if (getenv("NL_NO_KEYBOARD")) s.keyboard = s.mouse = false;
     return s;
 }
 

@@ -14,6 +14,6 @@ run*.log
 hdd/
 build.log
 smoke/
-newlegends.ini
+newlegends.ini*
 cache/
 dist/

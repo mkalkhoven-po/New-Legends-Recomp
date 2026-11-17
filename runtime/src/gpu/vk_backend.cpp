@@ -9,6 +9,7 @@
 
 #include <condition_variable>
 #include <algorithm>
+#include <atomic>
 #include <map>
 #include <set>
 #include <thread>
@@ -56,9 +57,96 @@ static void set_fullscreen(HWND h, bool on) {
     g_resized = true;
 }
 
+// The mouse: while the game has it, the pointer is hidden and kept inside the
+// window, and raw movement drives the camera (hle/input.cpp). The window takes
+// it when it becomes active with the pointer inside, or on a click inside;
+// it gives it back when another window becomes active (Alt+Tab).
+void input_mouse_move(int dx, int dy);
+void input_mouse_wheel(int delta);
+bool host_window_focused();
+static std::atomic<bool> g_mouse_captured;
+static std::atomic<bool> g_mouse_buttons_held;  // the click that took the mouse is still down
+
+static bool any_mouse_button() {
+    for (int vk : {VK_LBUTTON, VK_RBUTTON, VK_MBUTTON, VK_XBUTTON1, VK_XBUTTON2})
+        if (GetAsyncKeyState(vk) & 0x8000) return true;
+    return false;
+}
+
+static void clip_to_client(HWND h) {
+    RECT r;
+    GetClientRect(h, &r);
+    MapWindowPoints(h, nullptr, (POINT*)&r, 2);
+    ClipCursor(&r);
+}
+
+static void capture_mouse(HWND h, bool on) {
+    if (on && !settings().mouse) return;
+    if (on == g_mouse_captured) {
+        if (on) clip_to_client(h);
+        return;
+    }
+    g_mouse_captured = on;
+    if (on) {
+        g_mouse_buttons_held = any_mouse_button();
+        clip_to_client(h);
+        SetCursor(nullptr);
+    } else {
+        ClipCursor(nullptr);
+    }
+}
+
+static bool cursor_in_client(HWND h) {
+    POINT pt;
+    RECT r;
+    GetCursorPos(&pt);
+    ScreenToClient(h, &pt);
+    GetClientRect(h, &r);
+    return PtInRect(&r, pt) != 0;
+}
+
+bool host_mouse_captured() { return g_mouse_captured; }
+
+// Mouse buttons count only while the game has the mouse, and not the click
+// that gave it the mouse.
+bool host_mouse_buttons_ok() {
+    if (!settings().mouse) return host_window_focused();
+    if (!g_mouse_captured) return false;
+    if (g_mouse_buttons_held && !any_mouse_button()) g_mouse_buttons_held = false;
+    return !g_mouse_buttons_held;
+}
+
 static LRESULT CALLBACK wnd_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     switch (msg) {
-    case WM_SIZE: g_resized = true; return 0;
+    case WM_SIZE:
+        g_resized = true;
+        if (g_mouse_captured) clip_to_client(h);
+        return 0;
+    case WM_MOVE:
+        if (g_mouse_captured) clip_to_client(h);
+        break;
+    case WM_ACTIVATE:
+        if (LOWORD(wp) == WA_INACTIVE) capture_mouse(h, false);
+        else if (cursor_in_client(h)) capture_mouse(h, true);
+        break;
+    case WM_LBUTTONDOWN:
+    case WM_RBUTTONDOWN:
+    case WM_MBUTTONDOWN:
+    case WM_XBUTTONDOWN:
+        if (!g_mouse_captured && GetForegroundWindow() == h) capture_mouse(h, true);
+        break;
+    case WM_INPUT: {
+        RAWINPUT ri;
+        UINT size = sizeof ri;
+        if (g_mouse_captured &&
+            GetRawInputData((HRAWINPUT)lp, RID_INPUT, &ri, &size, sizeof(RAWINPUTHEADER)) != (UINT)-1 &&
+            ri.header.dwType == RIM_TYPEMOUSE && !(ri.data.mouse.usFlags & MOUSE_MOVE_ABSOLUTE))
+            input_mouse_move(ri.data.mouse.lLastX, ri.data.mouse.lLastY);
+        break;
+    }
+    case WM_MOUSEWHEEL:
+        if (g_mouse_captured) input_mouse_wheel(GET_WHEEL_DELTA_WPARAM(wp));
+        return 0;
     case WM_CLOSE: ExitProcess(0);
     case WM_SYSKEYDOWN:
         if (wp == VK_RETURN && (lp & (1 << 29)) && !(lp & (1 << 30))) {  // Alt+Enter, not a repeat
@@ -77,7 +165,7 @@ static LRESULT CALLBACK wnd_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         }
         break;
     case WM_SETCURSOR:
-        if (g_fullscreen && LOWORD(lp) == HTCLIENT) {
+        if ((g_fullscreen || g_mouse_captured) && LOWORD(lp) == HTCLIENT) {
             SetCursor(nullptr);
             return TRUE;
         }
@@ -106,6 +194,8 @@ static void window_thread() {
     HWND h = CreateWindowW(L"NewLegends", L"" NL_PRODUCT_NAME " " NL_VERSION_STRING, WINDOWED_STYLE, x, y, r.right - r.left, r.bottom - r.top,
                            nullptr, nullptr, wc.hInstance, nullptr);
     if (cfg.fullscreen) set_fullscreen(h, true);
+    RAWINPUTDEVICE mouse{0x01, 0x02, 0, h};  // generic desktop, mouse
+    if (!RegisterRawInputDevices(&mouse, 1, sizeof mouse)) log_msg("window: no raw mouse input (%lu)", GetLastError());
     {
         std::lock_guard<std::mutex> lk(g_win_m);
         g_hwnd = h;
@@ -128,6 +218,7 @@ void host_window_hide() {
     AdjustWindowRect(&client, WS_OVERLAPPEDWINDOW, FALSE);  // border sizes (negative left/top)
     settings_set_window(r.left, r.top, (r.right - r.left) - (client.right - client.left),
                         (r.bottom - r.top) - (client.bottom - client.top));
+    ClipCursor(nullptr);
     ShowWindow(g_hwnd, SW_HIDE);
 }
 

@@ -23,14 +23,21 @@ Kept here until the project has a GitHub repository; then these become issues.
 - [x] Aiming in third person is inverted (stick up looks down). The game has no option for it
       and the left stick is correct, so this is the original behaviour. Now flipped by default;
       `InvertAim=1` in `newlegends.ini` restores the Xbox behaviour.
-- [ ] Sound in videos is louder than in gameplay. The video player (Bink) sets the headroom to
+- [x] Sound in videos is louder than in gameplay. The video player (Bink) sets the headroom to
       0 itself, so videos are about 6 dB above music on the Xbox too; menus now match gameplay.
-      Decide whether to add a video volume setting.
-- [ ] **Mouse and keyboard play out of the box**
-  - [ ] Mouse look (right stick) with a sensible default sensitivity, mouse buttons for attack/use.
-  - [ ] Keyboard defaults that suit play on a PC, so nobody has to change keys.
-  - [ ] Controller and mouse/keyboard work at the same time, switching freely.
-  - [ ] Settings for sensitivity and inverting the vertical axis.
+      A video volume setting is a nice-to-have for later (see below).
+- [ ] **Mouse and keyboard play out of the box** (built; a person still has to try it)
+  - [x] Mouse look (right stick) with a sensible default sensitivity, mouse buttons for attack/use.
+        Raw mouse input drives the right stick just past the game's 30% dead zone plus a part
+        proportional to mouse speed (stick filter at 0x16DBD0). Checked with `NL_FAKE_MOUSE`
+        in frame dumps: the camera turns left/right and up/down and stops with the mouse.
+  - [x] Keyboard defaults that follow the game's own controller layout (`user.ini`, config 0):
+        mouse buttons attack, Space jump, Shift parry, E use, Q / wheel weapons, Ctrl aim,
+        Tab inventory, Escape menu.
+  - [x] Controller and mouse/keyboard work at the same time, switching freely.
+  - [x] Settings for sensitivity and inverting the vertical axis (`[Mouse]` in `newlegends.ini`).
+  - [ ] Try it in play: mouse feel and speed, the wheel, buttons in menus (Backspace / right
+        button to go back), Alt+Tab and clicking back in.
 - [ ] **Easy installation**
   - [ ] Point the program at a disc image (`.iso` / `.xiso`) or at a folder with the game files;
         it checks the version and copies or extracts what it needs by itself.
@@ -40,6 +47,21 @@ Kept here until the project has a GitHub repository; then these become issues.
 
 ## Later
 
+- [ ] **Graphics options** (in `newlegends.ini`, later perhaps an in-game menu)
+  - [ ] Anisotropic filtering: floors and walls at a steep angle stay sharp. Small job; the
+        Vulkan device already enables `samplerAnisotropy`.
+  - [ ] Higher internal render resolution (2x, 3x, 4x): the biggest visual gain over the
+        upscaled 640x480. Render targets, viewport, clip and the 1/16 px vertex snapping must
+        scale along; effects that render into small textures (water ripple simulation,
+        reflections, shadows) must keep their own size and still line up.
+  - [ ] Anti-aliasing (MSAA), mainly useful at the native resolution.
+  - [ ] Brightness / gamma.
+- [ ] Faster mouse turns: the mouse drives the right stick, so the camera turns at most at the
+      stick's top speed (about 180 degrees a second). Faster flicks need the camera code to
+      take the mouse directly.
+- [ ] Video volume setting (nice-to-have): videos play about 6 dB louder than gameplay, as on
+      the Xbox. A `VideoVolume` option could scale voices that the video player (Bink) creates
+      with headroom 0.
 - True widescreen (needs a change to the engine's field of view and picture width; the game
   ignores the Xbox widescreen setting).
 - Compass in "Return to the Soo Kingdom" shows garbage (source pointer of the texture is stale

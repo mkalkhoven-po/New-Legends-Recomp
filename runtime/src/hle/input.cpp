@@ -7,6 +7,8 @@
 #include <windows.h>
 #include <xinput.h>
 
+#include <atomic>
+#include <math.h>
 #include <string>
 #include <vector>
 
@@ -33,10 +35,114 @@ struct Pad {
 static Pad g_pads[PORTS];
 static u32 g_reported_mask;
 
-// Port 0 is always there: a real controller plus the keyboard (keys from
-// newlegends.ini), or the keyboard alone. Scripted presses from
+// Port 0 is always there: a real controller plus keyboard and mouse (from
+// newlegends.ini), or keyboard and mouse alone. Scripted presses from
 // NL_AUTOPRESS="seconds:button,..." and NL_MONKEY replace the real pad.
 bool host_window_focused();
+bool host_mouse_captured();
+bool host_mouse_buttons_ok();
+
+// ------------------------------------------------------------------ mouse
+// Raw mouse movement and wheel notches, added up by the window thread.
+static std::atomic<int> g_mouse_dx, g_mouse_dy, g_wheel;
+void input_mouse_move(int dx, int dy) {
+    g_mouse_dx += dx;
+    g_mouse_dy += dy;
+}
+void input_mouse_wheel(int delta) { g_wheel += delta; }
+
+// The game's right stick filter (0x16DBD0) scales the reading by the largest
+// value seen so far on that side (starting at 28000), cuts a dead zone of 30%
+// and turns the camera at a speed linear in what is left. The mouse sets the
+// stick just past the dead zone plus a part proportional to its speed, so
+// small movements turn the camera slowly instead of not at all.
+constexpr float STICK_DEAD_ZONE = 0.3f;
+constexpr s32 STICK_INITIAL_RANGE = 28000;
+// Mouse speed (counts per second) that turns the camera at full stick speed,
+// at Sensitivity=1.
+constexpr float MOUSE_FULL_SPEED = 2500.0f;
+
+// Largest values the game has been shown, per axis and side: its range.
+static s32 g_seen_max[2] = {STICK_INITIAL_RANGE, STICK_INITIAL_RANGE};
+static s32 g_seen_min[2] = {-STICK_INITIAL_RANGE, -STICK_INITIAL_RANGE};
+
+static s32 mouse_axis(float speed, int axis) {
+    if (speed == 0) return 0;
+    float r = fabsf(speed) * settings().mouse_sensitivity / MOUSE_FULL_SPEED;
+    if (r > 1) r = 1;
+    float v = STICK_DEAD_ZONE + (1 - STICK_DEAD_ZONE) * r;
+    return speed > 0 ? (s32)(v * g_seen_max[axis]) : (s32)(v * g_seen_min[axis]);
+}
+
+// Mouse look on top of the right stick, in the game's convention (positive y
+// looks down). The value is kept for at least 8 ms, so a second read in the
+// same frame does not see an empty mouse.
+static void mouse_look(s32& rx, s32& ry) {
+    static s64 last_us;
+    static s32 mx, my;
+    LARGE_INTEGER now, freq;
+    QueryPerformanceCounter(&now);
+    QueryPerformanceFrequency(&freq);
+    s64 us = now.QuadPart * 1000000 / freq.QuadPart;
+    // NL_FAKE_MOUSE="from,to,x,y": mouse movement of x,y counts per second
+    // between those seconds after start, for tests without a real mouse.
+    static float fake[4];
+    static bool faking = getenv("NL_FAKE_MOUSE") &&
+                         sscanf(getenv("NL_FAKE_MOUSE"), "%f,%f,%f,%f", &fake[0], &fake[1], &fake[2], &fake[3]) == 4;
+    if (faking) {
+        static s64 t0 = us, prev = us;
+        float t = (us - t0) / 1e6f;
+        if (t >= fake[0] && t < fake[1]) {
+            static float carry_x, carry_y;
+            carry_x += fake[2] * (us - prev) / 1e6f;
+            carry_y += fake[3] * (us - prev) / 1e6f;
+            int ix = (int)carry_x, iy = (int)carry_y;
+            carry_x -= ix, carry_y -= iy;
+            input_mouse_move(ix, iy);
+        }
+        prev = us;
+    }
+    if (!settings().mouse || !(faking || host_mouse_captured())) {
+        g_mouse_dx = 0;
+        g_mouse_dy = 0;
+        mx = my = 0;
+        last_us = us;
+        return;
+    }
+    s64 dt = us - last_us;
+    if (dt >= 8000) {
+        if (dt > 100000) dt = 100000;  // after a pause, do not spread the movement thin
+        float sx = g_mouse_dx.exchange(0) * 1e6f / dt, sy = g_mouse_dy.exchange(0) * 1e6f / dt;
+        if (settings().mouse_invert_y) sy = -sy;
+        mx = mouse_axis(sx, 0);
+        my = mouse_axis(sy, 1);
+        last_us = us;
+    }
+    if (abs(mx) > abs(rx)) rx = mx;
+    if (abs(my) > abs(ry)) ry = my;
+}
+
+// Wheel notches become short presses, one at a time, so the game sees each.
+static bool wheel_down(int key) {
+    static int active;  // KEY_WHEEL_* being pressed, or 0
+    static s64 until;
+    s64 now = now_ms();
+    if (active && now >= until) {
+        active = 0;
+        until = now + 50;  // released for a few frames before the next press
+    }
+    if (!active && now >= until) {
+        int w = g_wheel.load();
+        if (w >= WHEEL_DELTA) active = KEY_WHEEL_UP, g_wheel -= WHEEL_DELTA;
+        else if (w <= -WHEEL_DELTA) active = KEY_WHEEL_DOWN, g_wheel += WHEEL_DELTA;
+        if (active) until = now + 70;
+    }
+    return active == key;
+}
+
+static bool is_mouse_button(int vk) {
+    return vk == VK_LBUTTON || vk == VK_RBUTTON || vk == VK_MBUTTON || vk == VK_XBUTTON1 || vk == VK_XBUTTON2;
+}
 
 struct ScriptPress {
     s64 at_ms;
@@ -111,9 +217,16 @@ static void keyboard_state(XINPUT_GAMEPAD& g) {
     if (!cfg.keyboard || !host_window_focused()) return;
     // Alt+Enter switches fullscreen; it must not also press what Enter is bound to.
     bool alt = (GetAsyncKeyState(VK_MENU) & 0x8000) != 0;
+    bool buttons_ok = host_mouse_buttons_ok();
     auto down = [&](PadControl c) {
-        for (int vk : cfg.keys[c])
+        for (int vk : cfg.keys[c]) {
+            if (vk == KEY_WHEEL_UP || vk == KEY_WHEEL_DOWN) {
+                if (wheel_down(vk)) return true;
+                continue;
+            }
+            if (is_mouse_button(vk) && !buttons_ok) continue;
             if ((GetAsyncKeyState(vk) & 0x8000) && !(alt && vk == VK_RETURN)) return true;
+        }
         return false;
     };
     static const struct {
@@ -174,7 +287,7 @@ static bool poll(int port, XINPUT_STATE* out) {
         if (out) virtual_state(out);
         return true;
     }
-    bool keyboard = port == 0 && settings().keyboard;
+    bool keyboard = port == 0 && (settings().keyboard || settings().mouse);
     if (!p.connected && now < p.next_probe_ms) {
         if (keyboard) {
             if (out) virtual_state(out);
@@ -268,11 +381,25 @@ void hle_XInputGetState(Ctx* c) {
         log_msg("input: XInputGetState(%08X) call %u from %08X", rd32(c->esp + 4), calls, rd32(c->esp));
     XINPUT_STATE st;
     if (port < 0 || !poll(port, &st)) return hle_return(c, ERROR_DEVICE_NOT_CONNECTED_, 8);
+    XINPUT_GAMEPAD& g = st.Gamepad;
+    // The game looks down when the right stick is pushed up; by default the
+    // axis is flipped so up looks up, as PC players expect.
+    s32 rx = g.sThumbRX, ry = settings().invert_aim ? g.sThumbRY : -(s32)g.sThumbRY;
+    if (ry > 32767) ry = 32767;
+    if (port == 0) {
+        mouse_look(rx, ry);
+        s32 v[2] = {rx, ry};
+        for (int i = 0; i < 2; i++) {
+            if (v[i] > g_seen_max[i]) g_seen_max[i] = v[i];
+            if (v[i] < g_seen_min[i]) g_seen_min[i] = v[i];
+        }
+    }
+    g.sThumbRX = (SHORT)rx;
+    g.sThumbRY = (SHORT)ry;  // from here on in the game's convention
     Pad& p = g_pads[port];
-    // The keyboard can change the state without XInput's packet number moving.
+    // Keyboard and mouse can change the state without XInput's packet number moving.
     if (st.dwPacketNumber != p.last.dwPacketNumber || memcmp(&st.Gamepad, &p.last.Gamepad, sizeof st.Gamepad)) p.packet++;
     p.last = st;
-    const XINPUT_GAMEPAD& g = st.Gamepad;
     // Digital buttons share bit positions for d-pad, start, back and sticks.
     u16 buttons = g.wButtons & 0x00FF;
     u8 analogs[8] = {
@@ -290,10 +417,7 @@ void hle_XInputGetState(Ctx* c) {
     wr16(out + 14, (u16)g.sThumbLX);
     wr16(out + 16, (u16)g.sThumbLY);
     wr16(out + 18, (u16)g.sThumbRX);
-    // The game looks down when the right stick is pushed up; by default the
-    // axis is flipped so up looks up, as PC players expect.
-    s32 ry = settings().invert_aim ? g.sThumbRY : -(s32)g.sThumbRY;
-    wr16(out + 20, (u16)(s16)(ry > 32767 ? 32767 : ry));
+    wr16(out + 20, (u16)g.sThumbRY);
     hle_return(c, ERROR_SUCCESS_, 8);
 }
 

@@ -23,8 +23,14 @@ struct Settings {
     bool smooth = true;  // linear filtering when scaling the picture
     bool keyboard = true;
     bool invert_aim = false;  // true: stick up looks down, as the game does on the Xbox
-    std::vector<int> keys[PAD_CONTROL_COUNT];  // Windows virtual-key codes
+    bool mouse = true;        // mouse look (right stick)
+    float mouse_sensitivity = 1.0f;
+    bool mouse_invert_y = false;
+    std::vector<int> keys[PAD_CONTROL_COUNT];  // Windows virtual-key codes, or KEY_WHEEL_*
 };
+
+// Pseudo key codes for the mouse wheel (above the virtual-key range).
+constexpr int KEY_WHEEL_UP = 0x1000, KEY_WHEEL_DOWN = 0x1001;
 
 // Loaded once, before the window opens. Environment overrides from a running
 // session (fullscreen toggle, window position) are applied on top, so a

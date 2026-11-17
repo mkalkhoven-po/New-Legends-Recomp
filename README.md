@@ -16,7 +16,7 @@ the game (the US release).
 - Windows 10 (version 1803 or later) or Windows 11, 64-bit.
 - A graphics card with Vulkan 1.3 support and an up-to-date driver (most cards from 2016 on).
 - The files from your **New Legends (USA)** disc for the original Xbox.
-- An Xbox controller (or any XInput controller) is recommended; the keyboard works too.
+- An Xbox controller (or any XInput controller), or a keyboard and mouse.
 
 ## Installing
 
@@ -36,16 +36,31 @@ missing or different, it tells you what is wrong.
 A controller works as on the Xbox. The Black and White buttons are on the right and left
 bumpers.
 
-The keyboard works as a controller too, also when a controller is plugged in:
+You can also play with keyboard and mouse, without setting anything up. Both work at the
+same time as a controller, so you can switch whenever you like.
 
-| Controller | Key | Controller | Key |
-|---|---|---|---|
-| Left stick | W A S D | Right stick | I J K L |
-| D-pad | Arrow keys | Start / Back | Enter / Backspace |
-| A / B / X / Y | Space / E / Q / F | Black / White | C / Z |
-| Left / right trigger | Tab / R | Left / right stick click | V / B |
+| Action | Keyboard and mouse | Controller |
+|---|---|---|
+| Move | W A S D | Left stick |
+| Look around | Mouse | Right stick |
+| Attack with left hand | Left mouse button | X |
+| Attack with right hand | Right mouse button | B |
+| Jump | Space | A |
+| Parry | Shift | Y |
+| Use | E | White |
+| Next weapon | Q | Black |
+| Change weapon | Mouse wheel, ← → | D-pad left / right |
+| Aim (hold) | Ctrl, mouse back button | Left trigger |
+| Camera behind you | Middle mouse button, R | Right trigger |
+| Inventory | Tab | Back |
+| Menu | Escape, Enter | Start |
 
-**Alt+Enter** or **F11** switches between fullscreen and a window.
+Jump + left attack is a dash attack; parry + right attack is a super attack. In menus,
+the arrow keys choose, Space or Enter confirms and Backspace or the right mouse button
+goes back.
+
+While you play, the game window keeps the mouse pointer. **Alt+Tab** gives it back; click
+in the window to play on. **Alt+Enter** or **F11** switches between fullscreen and a window.
 
 ## Settings
 
@@ -54,7 +69,8 @@ The first start creates `newlegends.ini` next to the program. Open it in a text 
 - start in fullscreen, or set the window size;
 - choose the picture shape: the original 4:3 with black bars, or stretched to fill the screen;
 - choose smooth or sharp scaling;
-- change any keyboard key (the file lists the key names).
+- set the mouse speed, or turn the up/down direction of the mouse or the right stick around;
+- change any key or mouse button (the file lists the names).
 
 Delete the file to get the defaults back.
 
@@ -70,6 +86,8 @@ Everything stays in the program folder:
 
 - **The first visit to a place can stutter briefly** while its shaders are built. The next
   time they come from the `cache` folder.
+- **The camera has a top speed.** The mouse works like the controller's right stick, so a
+  very fast mouse movement turns the camera no faster than the stick would.
 - **No true widescreen.** The game only renders in 4:3; *Stretch* in the settings fills a
   wide screen but makes the picture wider.
 - **In the mission "Return to the Soo Kingdom" the compass in the corner can show as a
