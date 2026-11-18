@@ -1,16 +1,21 @@
 # Roadmap
 
-Kept here until the project has a GitHub repository; then these become issues.
+The plan lives on GitHub:
+[issues](https://github.com/mkalkhoven-po/New-Legends-Recomp/issues),
+[milestones](https://github.com/mkalkhoven-po/New-Legends-Recomp/milestones) and the
+[project board](https://github.com/users/mkalkhoven-po/projects/5).
 
-## Before the 0.9.0 release
+This file keeps the history of what was done before the repository existed.
 
-- [ ] Playthrough and listening test by a person (in progress).
-- Playtest 1 (Martin, 2026-11-16): saving and loading work.
+## Done for the 0.9.0 release
+
+- Playtest 1 (Martin, 2026-11-16): saving and loading work. The full playthrough by a person
+  is [#3](https://github.com/mkalkhoven-po/New-Legends-Recomp/issues/3).
 - [x] Voices are drowned out in gameplay: footsteps and weapons are much louder, and in fights
       voices drop out completely (a talking head moves its mouth, but nothing is heard).
       Fixed: 3D effects came out about 8 dB above speech and music (+3 dB pan law in front and
-      no HRTF loss). Now effects, speech and music average -16, -15 and -14 dB. To retest in
-      a fight with a talking head.
+      no HRTF loss). Now effects, speech and music average -16, -15 and -14 dB. Retested in
+      fights by Martin (2026-11-18): speech comes through fine.
 - [x] Frame rate keeps fluctuating during play. Fixed: the GPU thread spent 15-20 ms a frame
       generating and hashing shader text and hashing every texture per draw, so the game
       dropped between 60 and 30 fps. Shaders are now cached by the registers they read and
@@ -25,8 +30,9 @@ Kept here until the project has a GitHub repository; then these become issues.
       `InvertAim=1` in `newlegends.ini` restores the Xbox behaviour.
 - [x] Sound in videos is louder than in gameplay. The video player (Bink) sets the headroom to
       0 itself, so videos are about 6 dB above music on the Xbox too; menus now match gameplay.
-      A video volume setting is a nice-to-have for later (see below).
-- [ ] **Mouse and keyboard play out of the box** (built; a person still has to try it)
+      A video volume setting is a nice-to-have for later
+      ([#7](https://github.com/mkalkhoven-po/New-Legends-Recomp/issues/7)).
+- [x] **Mouse and keyboard play out of the box**
   - [x] Mouse look (right stick) with a sensible default sensitivity, mouse buttons for attack/use.
         Raw mouse input goes to the camera as its own JoyU/JoyV events each frame (viewport
         input event 0x16DEF0, after UpdateInput), so it skips the right stick filter (0x16DBD0:
@@ -38,8 +44,8 @@ Kept here until the project has a GitHub repository; then these become issues.
         Tab inventory, Escape menu.
   - [x] Controller and mouse/keyboard work at the same time, switching freely.
   - [x] Settings for sensitivity and inverting the vertical axis (`[Mouse]` in `newlegends.ini`).
-  - [ ] Try it in play: mouse feel and speed, the wheel, buttons in menus (Backspace / right
-        button to go back), Alt+Tab and clicking back in.
+  - [x] Tried in play (Martin, 2026-11-18): everything works; up/down now as fast as
+        left/right.
 - [x] **Easy installation** (built into the program, chosen 2026-11-18)
   - [x] Point the program at a disc image (`.iso` / `.xiso`, trimmed or full) or at a folder with
         the game files; it checks default.xbe's SHA-256 and entry.lin before copying, copies via
@@ -52,23 +58,12 @@ Kept here until the project has a GitHub repository; then these become issues.
   - [x] The release zip no longer has an empty `game` folder or the Python ISO script.
   - [x] Click through the window: file picker, progress, shortcuts, the game starting after
         (Martin, 2026-11-18, from the release zip: all works, extracting is quick).
-- [ ] Draft release on GitHub; Martin publishes and makes the repository public.
+- The draft release is [#2](https://github.com/mkalkhoven-po/New-Legends-Recomp/issues/2).
 
 ## Later
 
-- [ ] **Graphics options** (in `newlegends.ini`, later perhaps an in-game menu)
-  - [ ] Anisotropic filtering: floors and walls at a steep angle stay sharp. Small job; the
-        Vulkan device already enables `samplerAnisotropy`.
-  - [ ] Higher internal render resolution (2x, 3x, 4x): the biggest visual gain over the
-        upscaled 640x480. Render targets, viewport, clip and the 1/16 px vertex snapping must
-        scale along; effects that render into small textures (water ripple simulation,
-        reflections, shadows) must keep their own size and still line up.
-  - [ ] Anti-aliasing (MSAA), mainly useful at the native resolution.
-  - [ ] Brightness / gamma.
-- [ ] Video volume setting (nice-to-have): videos play about 6 dB louder than gameplay, as on
-      the Xbox. A `VideoVolume` option could scale voices that the video player (Bink) creates
-      with headroom 0.
-- True widescreen (needs a change to the engine's field of view and picture width; the game
-  ignores the Xbox widescreen setting).
-- Compass in "Return to the Soo Kingdom" shows garbage (source pointer of the texture is stale
-  at upload; root cause in the engine's loader not found).
+Moved to issues in the "M3 — Later" milestone: graphics options
+([#5](https://github.com/mkalkhoven-po/New-Legends-Recomp/issues/5)), true widescreen
+([#6](https://github.com/mkalkhoven-po/New-Legends-Recomp/issues/6)) and a video volume setting
+([#7](https://github.com/mkalkhoven-po/New-Legends-Recomp/issues/7)). The compass bug in
+"Return to the Soo Kingdom" is [#4](https://github.com/mkalkhoven-po/New-Legends-Recomp/issues/4).
