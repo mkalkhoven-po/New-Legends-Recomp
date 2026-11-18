@@ -102,7 +102,7 @@ Everything stays in the program folder:
 
 ## Reporting a problem
 
-Please include: what you did, what you saw, the last 30 lines of the console window, and
+Open an issue at <https://github.com/mkalkhoven-po/New-Legends-Recomp/issues>. Please include: what you did, what you saw, the last 30 lines of the console window, and
 your graphics card and driver version.
 
 ## Legal
