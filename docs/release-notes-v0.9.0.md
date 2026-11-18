@@ -6,11 +6,14 @@ your own New Legends (USA) disc; see the README.
 ## What is in it
 
 - All 35 levels load and run: graphics through Vulkan, sound through Windows audio,
-  controller and keyboard input, saving to the `hdd` folder.
+  controller, keyboard and mouse input, saving to the `hdd` folder.
+- Easy setup: on the first start, choose your disc image (`.iso` / `.xiso`) or a folder with
+  the game files. The program checks the version, copies the files and can make a desktop
+  shortcut and a Start menu entry.
+- Keyboard and mouse play without setting anything up, next to a controller.
 - Fullscreen (Alt+Enter or F11) and windowed mode; the original 4:3 picture or stretched.
-- Settings file `newlegends.ini`, including keyboard keys.
+- Settings file `newlegends.ini`: keys, mouse speed, inverted looking.
 - Shaders are kept in the `cache` folder, so a place only stutters on the first visit.
-- A check at startup that the game files are present and are the US version.
 
 ## Known issues
 

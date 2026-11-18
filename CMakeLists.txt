@@ -39,6 +39,7 @@ add_executable(newlegends
     runtime/src/hle/audio_out.cpp
     runtime/src/crash.cpp
     runtime/src/settings.cpp
+    runtime/src/setup.cpp
     runtime/src/gpu/nv2a.cpp
     runtime/src/gpu/pfifo.cpp
     runtime/src/gpu/pgraph.cpp
@@ -47,6 +48,7 @@ add_executable(newlegends
     runtime/src/gpu/texture.cpp
     runtime/src/gpu/shaders.cpp
     res/newlegends.rc
+    res/newlegends.manifest
 )
 # Vulkan and the runtime GLSL compiler from the LunarG SDK.
 set(VULKAN_SDK $ENV{VULKAN_SDK})
@@ -54,7 +56,7 @@ if(NOT VULKAN_SDK)
     message(FATAL_ERROR "VULKAN_SDK is not set (install the LunarG Vulkan SDK)")
 endif()
 target_include_directories(newlegends PRIVATE ${VULKAN_SDK}/Include)
-target_link_libraries(newlegends PRIVATE game_code winmm xinput dbghelp onecore ole32 bcrypt
+target_link_libraries(newlegends PRIVATE game_code winmm xinput dbghelp onecore ole32 bcrypt shell32 comctl32 uuid
     ${VULKAN_SDK}/Lib/vulkan-1.lib ${VULKAN_SDK}/Lib/shaderc_combined.lib)
 target_compile_options(newlegends PRIVATE -Wno-unused-parameter)
 # Guest stacks are in guest memory, but recompiled calls nest on the host stack.

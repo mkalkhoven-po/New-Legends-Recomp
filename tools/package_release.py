@@ -26,7 +26,7 @@ VC_REDIST = r"C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\
 SHIPPED_DLLS = ["msvcp140.dll", "vcruntime140.dll", "vcruntime140_1.dll"]
 # Part of Windows, or installed with the graphics driver (vulkan-1.dll).
 SYSTEM_DLLS = {"kernel32.dll", "user32.dll", "ole32.dll", "winmm.dll", "xinput1_4.dll", "dbghelp.dll",
-               "bcrypt.dll", "vulkan-1.dll"}
+               "bcrypt.dll", "vulkan-1.dll", "shell32.dll", "comctl32.dll"}
 GAME_DATA = re.compile(r"\.(xbe|lin|u|utx|uax|umx|usx|iso|xiso|xmv|wma|bik|sav)$", re.I)
 
 
@@ -90,14 +90,12 @@ def main():
     name = "NewLegendsRecomp-%s-win64" % ver
     stage = os.path.join(args.out, name)
     shutil.rmtree(stage, ignore_errors=True)
-    os.makedirs(os.path.join(stage, "game"))
     os.makedirs(os.path.join(stage, "licenses"))
     files = {
         exe: "newlegends.exe",
         os.path.join(ROOT, "README.md"): "README.md",
         os.path.join(ROOT, "THIRD_PARTY_NOTICES.md"): "THIRD_PARTY_NOTICES.md",
         os.path.join(ROOT, "docs", "release-notes-v%s.md" % ver): "RELEASE_NOTES.md",
-        os.path.join(ROOT, "tools", "xiso.py"): "extract_iso.py",
     }
     if os.path.exists(license_path):
         files[license_path] = "LICENSE.txt"
@@ -110,9 +108,8 @@ def main():
         if not os.path.exists(src):
             fail("missing " + src)
         shutil.copy2(src, os.path.join(stage, dst))
-    with open(os.path.join(stage, "game", "PUT_GAME_FILES_HERE.txt"), "w") as f:
-        f.write("Copy all files from your New Legends (USA) disc for the original Xbox into this folder,\n"
-                "so that default.xbe and the .lin level files are here. See README.md.\n")
+    # No "game" folder: the program sets it up on the first start (it would
+    # keep an existing one aside as game.old).
 
     # Last line of defence: nothing from the game may be in the package.
     for dirpath, _, names in os.walk(stage):

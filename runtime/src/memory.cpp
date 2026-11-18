@@ -19,6 +19,7 @@ void log_msg(const char* fmt, ...) {
 // A player started the program (its output goes to a console window, not to
 // a file of an automated test): errors also get a message box.
 static bool interactive() { return GetFileType(GetStdHandle(STD_ERROR_HANDLE)) == FILE_TYPE_CHAR; }
+bool host_interactive() { return interactive(); }
 
 // An error the player can fix (missing or wrong game files): explain and quit.
 [[noreturn]] void show_user_error(const char* text) {

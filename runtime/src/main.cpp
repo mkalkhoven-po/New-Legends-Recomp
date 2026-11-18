@@ -1,48 +1,26 @@
 #include <windows.h>
-#include <bcrypt.h>
+#include <shellapi.h>
 
+#include <stdio.h>
+
+#include <filesystem>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "func_table.h"
 #include "gpu.h"
 #include "kernel.h"
+#include "setup.h"
 #include "version.h"
 
 // Return address pushed for the boot thread; reaching it means the XBE entry
 // point returned to the "kernel".
 constexpr u32 BOOT_RETURN = 0xFE00FFF0u;
 
-// SHA-256 of the retail default.xbe the code was recompiled from
-// (New Legends, USA, title id 54510001, version 1).
-static const char* EXPECTED_XBE_SHA256 = "905f66ace66c4b315e13a6de374f89b1f5d46ee68bc5c25a6e7984343d3f58de";
-
 void crash_init();
 [[noreturn]] void show_user_error(const char* text);
-
-static std::string sha256_file(const char* path) {
-    FILE* f = fopen(path, "rb");
-    if (!f) return "";
-    BCRYPT_ALG_HANDLE alg;
-    BCRYPT_HASH_HANDLE h;
-    BCryptOpenAlgorithmProvider(&alg, BCRYPT_SHA256_ALGORITHM, nullptr, 0);
-    BCryptCreateHash(alg, &h, nullptr, 0, nullptr, 0, 0);
-    std::vector<unsigned char> buf(1 << 16);
-    size_t n;
-    while ((n = fread(buf.data(), 1, buf.size(), f)) > 0) BCryptHashData(h, buf.data(), (ULONG)n, 0);
-    fclose(f);
-    unsigned char digest[32];
-    BCryptFinishHash(h, digest, sizeof digest, 0);
-    BCryptDestroyHash(h);
-    BCryptCloseAlgorithmProvider(alg, 0);
-    std::string hex;
-    for (unsigned char b : digest) {
-        char t[3];
-        snprintf(t, sizeof t, "%02x", b);
-        hex += t;
-    }
-    return hex;
-}
+bool host_interactive();
 
 static bool file_exists(const std::string& p) { return GetFileAttributesA(p.c_str()) != INVALID_FILE_ATTRIBUTES; }
 
@@ -57,35 +35,70 @@ static void find_home() {
     SetCurrentDirectoryA(dir.c_str());
 }
 
-static void check_game_data(const std::string& xbe_path) {
-    if (!file_exists(xbe_path))
-        show_user_error(
-            "The game files were not found.\n\n"
-            "Copy all files from your New Legends disc (the US release) into the \"game\" folder next to "
-            "newlegends.exe, so that game\\default.xbe exists. See README.md for how to do that.");
-    std::string hash = sha256_file(xbe_path.c_str());
-    if (hash != EXPECTED_XBE_SHA256) {
-        log_msg("%s has SHA-256 %s, expected %s", xbe_path.c_str(), hash.c_str(), EXPECTED_XBE_SHA256);
-        show_user_error(
-            "The default.xbe in the \"game\" folder is not the version this program was made for.\n\n"
-            "Only the US release of New Legends for the original Xbox is supported. Make sure the files "
-            "come from that disc and are not modified.");
+static const char* MISSING_TEXT =
+    "The game files were not found.\n\n"
+    "Start newlegends.exe by double-clicking it to set them up from your disc image or a folder, or run "
+    "newlegends.exe --install <disc image or folder>. See README.md.";
+
+// newlegends.exe --install <image or folder>: setup without the window.
+static int install_from_command_line() {
+    int n = 0;
+    LPWSTR* wargv = CommandLineToArgvW(GetCommandLineW(), &n);
+    if (n < 3) {
+        fprintf(stderr, "Usage: newlegends.exe --install <disc image (.iso, .xiso) or folder with the game files>\n");
+        return 2;
     }
-    if (!file_exists(xbe_path.substr(0, xbe_path.find_last_of("/\\") + 1) + "entry.lin"))
-        show_user_error(
-            "The \"game\" folder has default.xbe but not the level files (such as entry.lin).\n\n"
-            "Copy all files from the disc, not just default.xbe.");
+    std::filesystem::path source(wargv[2]);
+    InstallProgress progress;
+    std::string error;
+    bool ok = false, done = false;
+    std::thread worker([&] {
+        ok = install_game_files(source, progress, &error);
+        done = true;
+    });
+    int last = -1;
+    while (!done) {
+        Sleep(200);
+        unsigned long long total = progress.total;
+        int pct = total ? (int)(progress.done * 100 / total) : 0;
+        if (progress.stage == 1 && pct / 10 != last / 10) {
+            printf("Copying the game files: %d%%\n", pct);
+            fflush(stdout);
+            last = pct;
+        }
+    }
+    worker.join();
+    if (!ok) {
+        fprintf(stderr, "%s\n", error.c_str());
+        return 1;
+    }
+    printf("The game files are set up.\n");
+    return 0;
 }
 
 int main(int argc, char** argv) {
-    if (argc <= 1) find_home();
-    std::string xbe_path = argc > 1 ? argv[1] : "game/default.xbe";
+    std::string mode = argc > 1 ? argv[1] : "";
+    bool setup_flag = mode == "--setup", install_flag = mode == "--install";
+    bool dev_path = argc > 1 && !setup_flag && !install_flag;  // developers: the xbe to run
+    if (!dev_path) find_home();
+    std::string xbe_path = dev_path ? argv[1] : "game/default.xbe";
     std::string game_dir = xbe_path.substr(0, xbe_path.find_last_of("/\\") + 1);
     if (game_dir.empty()) game_dir = ".";
 
     crash_init();
     log_msg("%s %s", NL_PRODUCT_NAME, NL_VERSION_STRING);
-    check_game_data(xbe_path);
+    if (install_flag) return install_from_command_line();
+    // Missing or wrong game files: the setup window, when someone is there to
+    // see it (not for test runs with their output in a file).
+    bool missing = !file_exists(xbe_path);
+    std::string problem = game_data_problem(xbe_path);
+    if (missing || !problem.empty() || setup_flag) {
+        if (dev_path || !host_interactive()) show_user_error(missing ? MISSING_TEXT : problem.c_str());
+        if (!run_setup_window(problem, !missing && problem.empty())) return 0;
+        missing = !file_exists(xbe_path);
+        problem = game_data_problem(xbe_path);
+        if (missing || !problem.empty()) show_user_error(missing ? MISSING_TEXT : problem.c_str());
+    }
     mem_init();
     XbeInfo xbe = xbe_load(xbe_path.c_str());
     if (xbe.entry != g_entry_point)

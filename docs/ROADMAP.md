@@ -40,11 +40,18 @@ Kept here until the project has a GitHub repository; then these become issues.
   - [x] Settings for sensitivity and inverting the vertical axis (`[Mouse]` in `newlegends.ini`).
   - [ ] Try it in play: mouse feel and speed, the wheel, buttons in menus (Backspace / right
         button to go back), Alt+Tab and clicking back in.
-- [ ] **Easy installation**
-  - [ ] Point the program at a disc image (`.iso` / `.xiso`) or at a folder with the game files;
-        it checks the version and copies or extracts what it needs by itself.
-  - [ ] A clear first-run screen instead of a message about a missing folder.
-  - [ ] Desktop shortcut (and Start menu entry) created on install.
+- [x] **Easy installation** (built into the program, chosen 2026-11-18)
+  - [x] Point the program at a disc image (`.iso` / `.xiso`, trimmed or full) or at a folder with
+        the game files; it checks default.xbe's SHA-256 and entry.lin before copying, copies via
+        `game.partial` and keeps an old `game` folder as `game.old` (runtime/src/setup.cpp).
+        Tested with `--install`: from the xiso and from a folder, identical to the original files
+        (443 files), plus a damaged file, an empty folder, the wrong version, missing levels.
+  - [x] A setup window on the first start (or with `--setup`) instead of an error message:
+        choose a disc image or folder, progress bar, stop button.
+  - [x] Desktop shortcut and Start menu entry (ticked by default).
+  - [x] The release zip no longer has an empty `game` folder or the Python ISO script.
+  - [x] Click through the window: file picker, progress, shortcuts, the game starting after
+        (Martin, 2026-11-18, from the release zip: all works, extracting is quick).
 - [ ] Draft release on GitHub; Martin publishes and makes the repository public.
 
 ## Later

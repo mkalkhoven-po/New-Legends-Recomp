@@ -15,21 +15,26 @@ the game (the US release).
 
 - Windows 10 (version 1803 or later) or Windows 11, 64-bit.
 - A graphics card with Vulkan 1.3 support and an up-to-date driver (most cards from 2016 on).
-- The files from your **New Legends (USA)** disc for the original Xbox.
+- Your own **New Legends (USA)** disc for the original Xbox, as a disc image (`.iso` or
+  `.xiso`, made from your disc) or as a folder with all files copied from it. A PC drive
+  cannot read Xbox discs, so you need one of these.
+- About 3.5 GB of free disk space.
 - An Xbox controller (or any XInput controller), or a keyboard and mouse.
 
 ## Installing
 
 1. Unpack the release zip into a folder of your own, for example `C:\Games\New Legends Recomp`.
-2. Copy **all** files from your New Legends disc into the `game` folder in it, so that
-   `game\default.xbe` and the level files (`entry.lin`, `01aFlare.lin`, …) are there.
-   - A PC drive cannot read Xbox discs. If you have a disc image (`.iso`) of your own disc,
-     extract it with an XISO tool such as *extract-xiso*. With Python 3 installed, the included
-     script works too: `python extract_iso.py extract "New Legends.iso" game`
-3. Start `newlegends.exe`.
+2. Start `newlegends.exe`.
+3. The first time, a setup window opens. Click **Choose disc image** and pick your `.iso` /
+   `.xiso`, or **Choose folder with the game files**. The program checks that it is the right
+   version of the game and copies the files into a `game` folder next to itself. It can also
+   make a shortcut on the desktop and in the Start menu (both ticked).
+4. The game starts. From then on, use the shortcut or `newlegends.exe`.
 
-At startup the program checks that the game files are the right version. If they are
-missing or different, it tells you what is wrong.
+After setup the disc image is no longer needed. If the game files are ever damaged or the
+wrong version, the setup window opens again and says what is wrong. To set them up again or
+make the shortcuts later, start `newlegends.exe --setup`. Without the window:
+`newlegends.exe --install "path\to\New Legends.iso"`.
 
 ## Controls
 
@@ -78,6 +83,8 @@ Delete the file to get the defaults back.
 
 Everything stays in the program folder:
 
+- `game` — the game files from your disc (if setup replaced an old `game` folder, that one
+  is kept as `game.old`; you can delete it);
 - `hdd` — the Xbox hard disk: your saved games and the game's own cache;
 - `cache` — compiled shaders, so places you have been load without stutter next time;
 - `newlegends.ini` — your settings.

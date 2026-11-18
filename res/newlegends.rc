@@ -1,9 +1,28 @@
-// Icon and version information for newlegends.exe.
+// Icon, version information and the setup window for newlegends.exe
+// (the manifest is res/newlegends.manifest, merged in by CMake).
 #include <winres.h>
+#include <commctrl.h>
 
+#include "../runtime/include/setup_ids.h"
 #include "../runtime/include/version.h"
 
 1 ICON "newlegends.ico"
+
+IDD_SETUP DIALOGEX 0, 0, 290, 196
+STYLE DS_SETFONT | DS_MODALFRAME | DS_CENTER | WS_POPUP | WS_CAPTION | WS_SYSMENU
+CAPTION "New Legends Recomp - setup"
+FONT 9, "Segoe UI", 400, 0, 0x1
+BEGIN
+    LTEXT "", IDC_INTRO, 12, 10, 266, 42
+    PUSHBUTTON "Choose disc image (.iso, .xiso)...", IDC_PICK_IMAGE, 12, 58, 130, 18
+    PUSHBUTTON "Choose folder with the game files...", IDC_PICK_FOLDER, 148, 58, 130, 18
+    AUTOCHECKBOX "Make a shortcut on the desktop", IDC_DESKTOP, 12, 88, 266, 10
+    AUTOCHECKBOX "Add to the Start menu", IDC_STARTMENU, 12, 102, 266, 10
+    LTEXT "", IDC_STATUS, 12, 120, 266, 34
+    CONTROL "", IDC_PROGRESS, PROGRESS_CLASS, WS_BORDER, 12, 156, 266, 9
+    DEFPUSHBUTTON "Start", IDOK, 174, 174, 50, 14
+    PUSHBUTTON "Quit", IDCANCEL, 228, 174, 50, 14
+END
 
 VS_VERSION_INFO VERSIONINFO
 FILEVERSION NL_VERSION_MAJOR, NL_VERSION_MINOR, NL_VERSION_PATCH, 0
