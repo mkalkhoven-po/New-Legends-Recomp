@@ -28,9 +28,11 @@ Kept here until the project has a GitHub repository; then these become issues.
       A video volume setting is a nice-to-have for later (see below).
 - [ ] **Mouse and keyboard play out of the box** (built; a person still has to try it)
   - [x] Mouse look (right stick) with a sensible default sensitivity, mouse buttons for attack/use.
-        Raw mouse input drives the right stick just past the game's 30% dead zone plus a part
-        proportional to mouse speed (stick filter at 0x16DBD0). Checked with `NL_FAKE_MOUSE`
-        in frame dumps: the camera turns left/right and up/down and stops with the mouse.
+        Raw mouse input goes to the camera as its own JoyU/JoyV events each frame (viewport
+        input event 0x16DEF0, after UpdateInput), so it skips the right stick filter (0x16DBD0:
+        30% dead zone, top speed about 180 degrees a second). Playtest 2 (Martin, 2026-11-18):
+        everything works, but turning was far too slow through the stick; now 4000 counts/s
+        turns 360 degrees a second, checked with `NL_FAKE_MOUSE` in frame dumps.
   - [x] Keyboard defaults that follow the game's own controller layout (`user.ini`, config 0):
         mouse buttons attack, Space jump, Shift parry, E use, Q / wheel weapons, Ctrl aim,
         Tab inventory, Escape menu.
@@ -56,9 +58,6 @@ Kept here until the project has a GitHub repository; then these become issues.
         reflections, shadows) must keep their own size and still line up.
   - [ ] Anti-aliasing (MSAA), mainly useful at the native resolution.
   - [ ] Brightness / gamma.
-- [ ] Faster mouse turns: the mouse drives the right stick, so the camera turns at most at the
-      stick's top speed (about 180 degrees a second). Faster flicks need the camera code to
-      take the mouse directly.
 - [ ] Video volume setting (nice-to-have): videos play about 6 dB louder than gameplay, as on
       the Xbox. A `VideoVolume` option could scale voices that the video player (Bink) creates
       with headroom 0.

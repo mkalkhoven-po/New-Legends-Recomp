@@ -86,8 +86,6 @@ Everything stays in the program folder:
 
 - **The first visit to a place can stutter briefly** while its shaders are built. The next
   time they come from the `cache` folder.
-- **The camera has a top speed.** The mouse works like the controller's right stick, so a
-  very fast mouse movement turns the camera no faster than the stick would.
 - **No true widescreen.** The game only renders in 4:3; *Stretch* in the settings fills a
   wide screen but makes the picture wider.
 - **In the mission "Return to the Soo Kingdom" the compass in the corner can show as a

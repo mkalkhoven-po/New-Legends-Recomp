@@ -8,7 +8,6 @@
 #include <xinput.h>
 
 #include <atomic>
-#include <math.h>
 #include <string>
 #include <vector>
 
@@ -51,35 +50,21 @@ void input_mouse_move(int dx, int dy) {
 }
 void input_mouse_wheel(int delta) { g_wheel += delta; }
 
-// The game's right stick filter (0x16DBD0) scales the reading by the largest
-// value seen so far on that side (starting at 28000), cuts a dead zone of 30%
-// and turns the camera at a speed linear in what is left. The mouse sets the
-// stick just past the dead zone plus a part proportional to its speed, so
-// small movements turn the camera slowly instead of not at all.
-constexpr float STICK_DEAD_ZONE = 0.3f;
-constexpr s32 STICK_INITIAL_RANGE = 28000;
-// Mouse speed (counts per second) that turns the camera at full stick speed,
-// at Sensitivity=1.
-constexpr float MOUSE_FULL_SPEED = 2500.0f;
+// Mouse look. The right stick goes through the game's filter (0x16DBD0: a 30%
+// dead zone, then capped at full deflection), which tops out at about 180
+// degrees a second. The mouse skips it: hle_viewport_update_input sends its
+// own camera events (JoyU / JoyV) each frame, as a turning speed in stick
+// units, so the angle follows the distance the mouse moved, without a cap.
+//
+// Mouse speed (counts per second) that turns the camera as fast as a fully
+// pushed stick, at Sensitivity=1: about 0.09 degrees per count.
+constexpr float MOUSE_FULL_SPEED = 2000.0f;
 
-// Largest values the game has been shown, per axis and side: its range.
-static s32 g_seen_max[2] = {STICK_INITIAL_RANGE, STICK_INITIAL_RANGE};
-static s32 g_seen_min[2] = {-STICK_INITIAL_RANGE, -STICK_INITIAL_RANGE};
-
-static s32 mouse_axis(float speed, int axis) {
-    if (speed == 0) return 0;
-    float r = fabsf(speed) * settings().mouse_sensitivity / MOUSE_FULL_SPEED;
-    if (r > 1) r = 1;
-    float v = STICK_DEAD_ZONE + (1 - STICK_DEAD_ZONE) * r;
-    return speed > 0 ? (s32)(v * g_seen_max[axis]) : (s32)(v * g_seen_min[axis]);
-}
-
-// Mouse look on top of the right stick, in the game's convention (positive y
-// looks down). The value is kept for at least 8 ms, so a second read in the
-// same frame does not see an empty mouse.
-static void mouse_look(s32& rx, s32& ry) {
+// Camera speed for this frame in stick units (positive x turns right,
+// positive y looks down, as the game's stick events). False when there is
+// nothing to send.
+bool input_mouse_camera(float* x, float* y) {
     static s64 last_us;
-    static s32 mx, my;
     LARGE_INTEGER now, freq;
     QueryPerformanceCounter(&now);
     QueryPerformanceFrequency(&freq);
@@ -102,24 +87,18 @@ static void mouse_look(s32& rx, s32& ry) {
         }
         prev = us;
     }
-    if (!settings().mouse || !(faking || host_mouse_captured())) {
-        g_mouse_dx = 0;
-        g_mouse_dy = 0;
-        mx = my = 0;
-        last_us = us;
-        return;
-    }
     s64 dt = us - last_us;
-    if (dt >= 8000) {
-        if (dt > 100000) dt = 100000;  // after a pause, do not spread the movement thin
-        float sx = g_mouse_dx.exchange(0) * 1e6f / dt, sy = g_mouse_dy.exchange(0) * 1e6f / dt;
-        if (settings().mouse_invert_y) sy = -sy;
-        mx = mouse_axis(sx, 0);
-        my = mouse_axis(sy, 1);
-        last_us = us;
-    }
-    if (abs(mx) > abs(rx)) rx = mx;
-    if (abs(my) > abs(ry)) ry = my;
+    last_us = us;
+    int dx = g_mouse_dx.exchange(0), dy = g_mouse_dy.exchange(0);
+    if (!settings().mouse || !(faking || host_mouse_captured()) || (dx == 0 && dy == 0)) return false;
+    if (dt < 1000) dt = 1000;
+    if (dt > 100000) dt = 100000;  // after a pause, do not turn the stored movement into a jerk
+    float k = settings().mouse_sensitivity / MOUSE_FULL_SPEED * 1e6f / dt;
+    *x = dx * k;
+    // The game binds JoyU at speed 50 and JoyV at 40 (user.ini): scale y up so a
+    // mouse count turns the camera as far up/down as left/right.
+    *y = (settings().mouse_invert_y ? -dy : dy) * k * (50.0f / 40.0f);
+    return true;
 }
 
 // Wheel notches become short presses, one at a time, so the game sees each.
@@ -386,14 +365,6 @@ void hle_XInputGetState(Ctx* c) {
     // axis is flipped so up looks up, as PC players expect.
     s32 rx = g.sThumbRX, ry = settings().invert_aim ? g.sThumbRY : -(s32)g.sThumbRY;
     if (ry > 32767) ry = 32767;
-    if (port == 0) {
-        mouse_look(rx, ry);
-        s32 v[2] = {rx, ry};
-        for (int i = 0; i < 2; i++) {
-            if (v[i] > g_seen_max[i]) g_seen_max[i] = v[i];
-            if (v[i] < g_seen_min[i]) g_seen_min[i] = v[i];
-        }
-    }
     g.sThumbRX = (SHORT)rx;
     g.sThumbRY = (SHORT)ry;  // from here on in the game's convention
     Pad& p = g_pads[port];

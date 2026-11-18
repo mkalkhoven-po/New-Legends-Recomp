@@ -222,6 +222,40 @@ void hle_viewport_serialize(Ctx* c) {
 
 // UXboxViewport::UpdateInput(UBOOL Reset), thiscall: once per tick on the game
 // thread, a safe place to enter the engine.
+// Mouse look: camera events of its own after the controller's, in stick
+// units, through UViewport's input event (key, state, delta). JoyU / JoyV are
+// what the right stick sends; [pads + 0xE4] is the right stick speed factor.
+bool input_mouse_camera(float* x, float* y);
+namespace {
+constexpr u32 VIEWPORT_PADS = 0x18;
+constexpr u32 PADS_RIGHT_SPEED = 0xE4;
+constexpr u32 VIEWPORT_INPUT_EVENT = 0x16DEF0;
+constexpr u32 IK_JOY_U = 0xE8, IK_JOY_V = 0xE9, IST_AXIS = 4;
+
+void mouse_camera(Ctx* c, u32 viewport) {
+    float x, y;
+    if (!input_mouse_camera(&x, &y)) return;
+    u32 pads = rd32(viewport + VIEWPORT_PADS);
+    if (!pads) return;
+    u32 speed_bits = rd32(pads + PADS_RIGHT_SPEED);
+    float speed;
+    memcpy(&speed, &speed_bits, 4);
+    u32 esp = c->esp, ecx = c->ecx, eax = c->eax, edx = c->edx;
+    const struct {
+        u32 key;
+        float v;
+    } axes[] = {{IK_JOY_U, x * speed}, {IK_JOY_V, y * speed}};
+    for (auto& a : axes) {
+        if (a.v == 0) continue;
+        u32 bits;
+        memcpy(&bits, &a.v, 4);
+        c->ecx = viewport;
+        guest_call(c, VIEWPORT_INPUT_EVENT, {a.key, IST_AXIS, bits}, true);
+    }
+    c->esp = esp, c->ecx = ecx, c->eax = eax, c->edx = edx;
+}
+}  // namespace
+
 void hle_viewport_update_input(Ctx* c) {
     using Clock = std::chrono::steady_clock;
     static std::vector<ExecCmd> cmds = parse_exec_list();
@@ -234,7 +268,9 @@ void hle_viewport_update_input(Ctx* c) {
         while (next < cmds.size() && cmds[next].at <= t) exec_console(c, c->ecx, cmds[next++].text);
     }
     tour_step(c, c->ecx);
+    u32 viewport = c->ecx;
     f_0016ED00(c);
+    mouse_camera(c, viewport);
 }
 
 // CRT _JumpToContinuation(void* target, EHRegistrationNode* frame): leave a
